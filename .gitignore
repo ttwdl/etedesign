@@ -13,6 +13,7 @@ __pycache__/
 checkpoints*/
 results*/
 runs*/
+logs/
 
 # 本地数据缓存
 data_cache*/
