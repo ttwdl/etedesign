@@ -19,7 +19,12 @@
 from __future__ import annotations
 
 import csv
+import os
 from pathlib import Path
+
+# Windows + conda 下，torch / scipy / numpy 有时会重复加载 OpenMP DLL。
+# 这里让推理脚本继续运行。它只用于离线评估和画图，不影响训练参数。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import matplotlib
 
@@ -128,12 +133,45 @@ def move_spectral_axis_to_last(arr: np.ndarray) -> np.ndarray:
     raise ValueError(f"不认识的高光谱数据 shape={arr.shape}")
 
 
+def find_cave_band_pngs(scene_dir: Path) -> list[Path]:
+    """在一个 CAVE 场景目录里寻找 31 张波段 PNG。
+
+    CAVE 解压后常见两种结构：
+    1. extracted/balloons_ms/balloons_ms_01.png
+    2. extracted/balloons_ms/balloons_ms/balloons_ms_01.png
+
+    所以这里先找当前目录；找不到就递归到子目录里找。
+    """
+
+    direct_pngs = sorted(scene_dir.glob("*_ms_*.png"))
+    if len(direct_pngs) >= 31:
+        return direct_pngs[:31]
+
+    candidate_dirs = []
+    for path in scene_dir.rglob("*"):
+        if not path.is_dir():
+            continue
+        pngs = sorted(path.glob("*_ms_*.png"))
+        if len(pngs) >= 31:
+            candidate_dirs.append((path, pngs[:31]))
+
+    if not candidate_dirs:
+        return []
+
+    # 如果有多个候选，选路径最短的那个，一般就是实际场景目录。
+    candidate_dirs.sort(key=lambda item: len(str(item[0])))
+    return candidate_dirs[0][1]
+
+
 def load_cave_scene(scene_dir: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
     """读取 CAVE 场景目录，返回 [H,W,151]。"""
 
-    pngs = sorted(scene_dir.glob("*_ms_*.png"))[:31]
+    pngs = find_cave_band_pngs(scene_dir)
     if len(pngs) != 31:
-        raise ValueError(f"{scene_dir} 中没有找到 31 张 *_ms_*.png 波段图。")
+        raise ValueError(
+            f"{scene_dir} 中没有找到 31 张 *_ms_*.png 波段图。"
+            "如果这是普通 RGB 图片目录，它不能直接用于高光谱重建。"
+        )
 
     bands = [image_to_float01(path) for path in pngs]
     cube31 = np.stack(bands, axis=-1)
