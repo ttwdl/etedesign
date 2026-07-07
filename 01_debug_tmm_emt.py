@@ -48,12 +48,12 @@ USER_SETTINGS = {
     "g_min_nm": 40.0,
     "d_min_nm": 60.0,
     "enforce_d_min": True,
-    "output_dir": "results_16ch_t06_tor20_150",
+    "output_dir": "results_25ch_t06_tor20_150",
     "device": "cuda",
 
-    # 和 03_train_ar_emt.py 保持一致：这次试 16 通道。
-    "n_channels": 16,
-    "hidden_dims": (512, 256),
+    # 和 03_train_ar_emt.py 保持一致：这次试 25 通道。
+    "n_channels": 25,
+    "hidden_dims": (768, 384),
     "h_c_range": (250.0, 1500.0),
     "t_r_range": (0.0, 1500.0),
     "core_total_nm": 1000.0,

@@ -71,9 +71,9 @@ USER_SETTINGS = {
     # ---- 路径 ----
     # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "checkpoint_dir": "checkpoints_16ch_t06_tor20_150",
-    "results_dir": "results_16ch_t06_tor20_150",
-    "tensorboard_dir": "runs/ar_emt_16ch_t06_tor20_150",
+    "checkpoint_dir": "checkpoints_25ch_t06_tor20_150",
+    "results_dir": "results_25ch_t06_tor20_150",
+    "tensorboard_dir": "runs/ar_emt_25ch_t06_tor20_150",
 
     # ---- 设备 / 复现 ----
     "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
@@ -96,8 +96,8 @@ USER_SETTINGS = {
     # H_total = h_c_l + t_r_l，是所有通道共享的“总腔长”，训练时会整体一起变。
     # h_c_l 是每个通道自己的 EMT 腔厚，t_r_l 不单独训练，而是用 H_total - h_c_l 自动算。
     # aspect_ratio_max 控制 TiO2 柱最大深宽比：h_c_l / D_l <= 10，避免柱子太高太细。
-    "n_channels": 16,              # 16 个滤光片，对应 4x4 超像素；空间分辨率损失最小
-    "hidden_dims": (512, 256),     # 16 通道版本使用较小的 MLP 解码器
+    "n_channels": 25,              # 25 个滤光片，对应 5x5 超像素；光谱测量更多，空间分辨率损失适中
+    "hidden_dims": (768, 384),     # 25 通道版本使用中等宽度的 MLP 解码器
     "h_c_range": (250.0, 1500.0),
     "t_r_range": (0.0, 1500.0),
     "core_total_nm": 1000.0,
@@ -118,7 +118,7 @@ USER_SETTINGS = {
     "lambda_sam": 0.05,     # 光谱角权重：轻微保住谱形；不想要就设 0
     "lambda_l1": 0.10,      # 逐点 L1 权重：逼每个波长点更贴近
     "lambda_diff": 0.20,    # 一阶差分 L1 权重：逼曲线起伏、谱峰边缘更贴近
-    "tor_target_percent": 2.0,  # 16 通道数量少一些，继续用 2% 的最小通道差异目标
+    "tor_target_percent": 2.0,  # 25 通道继续用 2% 的最小通道差异目标
     "lambda_tor": 0.01,         # tor 下限约束权重；先温和开，太大会牺牲重建精度
 
     # ---- 优化器 ----
