@@ -18,7 +18,13 @@
 from __future__ import annotations
 
 import csv
+import os
 from pathlib import Path
+
+# Windows + conda 里，PyTorch / NumPy / SciPy / Matplotlib 有时会重复加载 Intel OpenMP。
+# 如果不提前设置，可能出现 “OMP: Error #15: Initializing libiomp5md.dll”。
+# 这行只影响当前脚本进程；以后如果你重装环境彻底解决冲突，可以删掉它。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import matplotlib
 
@@ -41,7 +47,7 @@ USER_SETTINGS = {
     "checkpoint": "checkpoints/ar_emt_best.pt",
 
     # 默认拿一个 CAVE 场景做例子；可改成别的 CAVE 目录或 npy/mat 文件。
-    "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms",
+    "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms\balloons_ms",
 
     # 推理结果单独放这里，别和训练结果混。
     "output_dir": "results_infer",

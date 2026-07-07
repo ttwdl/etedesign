@@ -13,7 +13,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+# Windows + conda 里，PyTorch / NumPy / SciPy / Matplotlib 有时会重复加载 Intel OpenMP。
+# 如果不提前设置，可能出现 “OMP: Error #15: Initializing libiomp5md.dll”。
+# 这行只影响当前脚本进程；以后如果你重装环境彻底解决冲突，可以删掉它。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import matplotlib
 
