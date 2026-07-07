@@ -44,13 +44,13 @@ from ar_emt_common import AREMTModel, GeometryConfig, metric_mse_psnr_sam, model
 # =============================================================================
 USER_SETTINGS = {
     # 用 best checkpoint 推理。训练没结束时也可临时改成 checkpoints/ar_emt_last.pt。
-    "checkpoint": "checkpoints_36ch_t06_tor15_50/ar_emt_best.pt",
+    "checkpoint": "checkpoints_16ch_t06_tor20_150/ar_emt_best.pt",
 
     # 默认拿一个 CAVE 场景做例子；可改成别的 CAVE 目录或 npy/mat 文件。
     "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms\balloons_ms",
 
     # 推理结果单独放这里，别和训练结果混。
-    "output_dir": "results_infer_36ch_t06_tor15_50",
+    "output_dir": "results_infer_16ch_t06_tor20_150",
 
     "device": "cuda",
     "angle_deg": 0.0,
