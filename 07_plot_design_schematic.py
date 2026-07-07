@@ -29,7 +29,7 @@ from matplotlib.patches import Circle, Rectangle
 import numpy as np
 import torch
 
-from ar_emt_common import AREMTModel, GeometryConfig, structure_rows
+from ar_emt_common import AREMTModel, GeometryConfig, model_kwargs_from_settings, structure_rows
 
 
 # =============================================================================
@@ -54,7 +54,7 @@ def load_model(checkpoint_path: Path) -> AREMTModel:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     config = GeometryConfig(**ckpt["config"])
     wl_nm = ckpt["wl_nm"].to(dtype=torch.float32)
-    model = AREMTModel(wl_nm, config)
+    model = AREMTModel(wl_nm, config, **model_kwargs_from_settings(ckpt.get("settings", {})))
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     return model

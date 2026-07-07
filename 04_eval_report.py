@@ -40,6 +40,7 @@ from ar_emt_common import (
     evaluate_fixed_angle,
     geometry_report,
     metric_mse_psnr_sam,
+    model_kwargs_from_settings,
     structure_rows,
     tor_percent,
 )
@@ -105,7 +106,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[AREMTModel,
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = GeometryConfig(**ckpt["config"])
     wl_nm = ckpt["wl_nm"].to(dtype=torch.float32)
-    model = AREMTModel(wl_nm, config).to(device)
+    model = AREMTModel(wl_nm, config, **model_kwargs_from_settings(ckpt.get("settings", {}))).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 

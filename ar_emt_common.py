@@ -769,6 +769,42 @@ class AREMTModel(nn.Module):
         return pred, t
 
 
+def model_kwargs_from_settings(settings: dict | None) -> dict:
+    """从 USER_SETTINGS / checkpoint settings 里取出建模参数。
+
+    这些参数会改变 raw 参数到真实物理量的映射关系，例如：
+      raw_core_total → H_total；
+      raw_h_c        → h_c_l；
+      raw_ar         → AR 层厚度。
+
+    所以训练、评估、外部图片推理必须使用同一套范围。
+    训练脚本会把 settings 存进 checkpoint；04/05/07 再从 checkpoint 里读回来。
+    如果读的是老 checkpoint，里面没有这些字段，就自动使用 AREMTModel 的默认值。
+    """
+
+    if settings is None:
+        settings = {}
+
+    names = [
+        "hidden_dims",
+        "h_c_range",
+        "t_r_range",
+        "core_total_nm",
+        "core_total_range",
+        "aspect_ratio_max",
+        "ar_range",
+    ]
+    kwargs = {}
+    for name in names:
+        if name in settings:
+            value = settings[name]
+            # checkpoint 里的 tuple 可能被保存/读成 list；这里转回 tuple，方便和默认写法一致。
+            if name in {"hidden_dims", "h_c_range", "t_r_range", "core_total_range", "ar_range"}:
+                value = tuple(value)
+            kwargs[name] = value
+    return kwargs
+
+
 # =============================================================================
 # 第 7 部分：评估指标 与 结构参数导出
 # =============================================================================

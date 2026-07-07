@@ -54,6 +54,7 @@ from ar_emt_common import (
     emt_condition,
     evaluate_fixed_angle,
     geometry_report,
+    model_kwargs_from_settings,
     measurement_matrix_coherence,
     sam_loss,
     structure_rows,
@@ -88,6 +89,17 @@ USER_SETTINGS = {
     #   per_sample : 每条光谱各自随机一个角度（最贴近真实，但最慢）
     "angle_mode": "per_sample",
     "angle_max_deg": 5.0,
+
+    # ---- 可训练物理结构范围 ----
+    # H_total = h_c_l + t_r_l，是 16 个通道共享的“总腔长”，训练时会整体一起变。
+    # h_c_l 是每个通道自己的 EMT 腔厚，t_r_l 不单独训练，而是用 H_total - h_c_l 自动算。
+    # aspect_ratio_max 控制 TiO2 柱最大深宽比：h_c_l / D_l <= 10，避免柱子太高太细。
+    "hidden_dims": (512, 256),
+    "h_c_range": (250.0, 1500.0),
+    "t_r_range": (0.0, 1500.0),
+    "core_total_nm": 650.0,
+    "core_total_range": (450.0, 1800.0),
+    "aspect_ratio_max": 10.0,
 
     # ---- 测量噪声（重要）----
     # 真实探测器一定有噪声；干净训练会让重建“纸面好看、上机就崩”，所以默认开一点。
@@ -575,7 +587,7 @@ def main() -> None:
     print(geometry_report(config))
     print()
 
-    model = AREMTModel(wl_nm, config).to(device)
+    model = AREMTModel(wl_nm, config, **model_kwargs_from_settings(settings)).to(device)
     optimizer = make_optimizer(model, settings)
     scheduler = make_scheduler(optimizer, settings)
     mse_fn = nn.MSELoss()
