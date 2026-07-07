@@ -4,7 +4,7 @@
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 05_infer_external_image.py
 
 它解决的问题：
-  训练完之后，你想把一张真实高光谱 cube 输入进来，模拟它经过 16 个滤光片后的
+  训练完之后，你想把一张真实高光谱 cube 输入进来，模拟它经过多个滤光片后的
   测量值，再用保存好的解码器把光谱重建出来，并画图/存结果看效果。
 
 支持的输入：
@@ -44,13 +44,13 @@ from ar_emt_common import AREMTModel, GeometryConfig, metric_mse_psnr_sam, model
 # =============================================================================
 USER_SETTINGS = {
     # 用 best checkpoint 推理。训练没结束时也可临时改成 checkpoints/ar_emt_last.pt。
-    "checkpoint": "checkpoints_recon_t06_tor25_50/ar_emt_best.pt",
+    "checkpoint": "checkpoints_25ch_t06_tor20_50/ar_emt_best.pt",
 
     # 默认拿一个 CAVE 场景做例子；可改成别的 CAVE 目录或 npy/mat 文件。
     "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms\balloons_ms",
 
     # 推理结果单独放这里，别和训练结果混。
-    "output_dir": "results_infer_recon_t06_tor25_50",
+    "output_dir": "results_infer_25ch_t06_tor20_50",
 
     "device": "cuda",
     "angle_deg": 0.0,
@@ -209,7 +209,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> AREMTModel:
 
 def run_inference(model: AREMTModel, spectra: np.ndarray, angle_deg: float,
                   batch_size: int, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
-    """批量推理。输入 [N,151]；输出 重建 [N,151] 和 16 通道测量 [N,16]。
+    """批量推理。输入 [N,151]；输出重建 [N,151] 和多通道测量 [N,C]。
 
     这里不加噪声（模拟“理想读数下”的重建效果）；想看抗噪表现请用 04 的噪声鲁棒性评估。
     """
@@ -297,16 +297,22 @@ def plot_error_map(gt_flat, pred_flat, image_shape, out_path: Path) -> None:
 
 
 def plot_measurement_preview(meas_flat, image_shape, out_path: Path) -> None:
-    """画 16 个滤光片各自的测量图（相当于 16 张“伪彩通道图”）。"""
+    """画每个滤光片各自的测量图（相当于多张“伪彩通道图”）。"""
 
     h, w = image_shape
-    meas = meas_flat.reshape(h, w, 16)
-    fig, axes = plt.subplots(4, 4, figsize=(8, 8))
+    n_channels = meas_flat.shape[1]
+    meas = meas_flat.reshape(h, w, n_channels)
+    n_cols = int(np.ceil(np.sqrt(n_channels)))
+    n_rows = int(np.ceil(n_channels / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.0 * n_cols, 2.0 * n_rows), squeeze=False)
     for ch, ax in enumerate(axes.ravel()):
+        if ch >= n_channels:
+            ax.axis("off")
+            continue
         im = ax.imshow(meas[:, :, ch], cmap="viridis")
         ax.set_title(f"ch{ch}", fontsize=9); ax.axis("off")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-    fig.suptitle("Simulated 16-channel measurements", fontsize=12)
+    fig.suptitle(f"Simulated {n_channels}-channel measurements", fontsize=12)
     fig.tight_layout(); fig.savefig(out_path, dpi=160); plt.close(fig)
 
 
@@ -352,7 +358,7 @@ def main() -> None:
 
     # 存原始数组，方便你后续自己分析
     np.save(output_dir / "input_spectra_151.npy", spectra_flat.astype(np.float32))
-    np.save(output_dir / "measurement_16ch.npy", meas_flat.astype(np.float32))
+    np.save(output_dir / "measurement_channels.npy", meas_flat.astype(np.float32))
     np.save(output_dir / "reconstructed_spectra_151.npy", pred_flat.astype(np.float32))
 
     # 有图像宽高时，额外存成 cube 并画误差图/测量图
@@ -360,7 +366,7 @@ def main() -> None:
         h, w = image_shape
         np.save(output_dir / "input_cube_151.npy", spectra_flat.reshape(h, w, 151).astype(np.float32))
         np.save(output_dir / "reconstructed_cube_151.npy", pred_flat.reshape(h, w, 151).astype(np.float32))
-        np.save(output_dir / "measurement_16ch_image.npy", meas_flat.reshape(h, w, 16).astype(np.float32))
+        np.save(output_dir / "measurement_channels_image.npy", meas_flat.reshape(h, w, meas_flat.shape[1]).astype(np.float32))
         plot_error_map(spectra_flat, pred_flat, image_shape, output_dir / "reconstruction_error_map.png")
         plot_measurement_preview(meas_flat, image_shape, output_dir / "measurement_channels_preview.png")
 

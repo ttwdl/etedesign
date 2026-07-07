@@ -7,7 +7,7 @@
 1. 打印几何约束(D/P、D、gap)和 EMT 条件；
 2. 快速对比几种 AR 层序的透过率高低，看看增透趋势对不对；
 3. 检查 TMM 的梯度能不能反向传播到结构参数（能，才谈得上训练）；
-4. 存一张初始 16 通道透过谱图，肉眼看看形状。
+4. 存一张初始多通道透过谱图，肉眼看看形状。
 """
 
 from __future__ import annotations
@@ -48,15 +48,16 @@ USER_SETTINGS = {
     "g_min_nm": 40.0,
     "d_min_nm": 60.0,
     "enforce_d_min": True,
-    "output_dir": "results_recon_t06_tor25_50",
+    "output_dir": "results_25ch_t06_tor20_50",
     "device": "cuda",
 
-    # 和 03_train_ar_emt.py 保持一致：这次试“长腔 + tor 约束”。
-    "hidden_dims": (512, 256),
+    # 和 03_train_ar_emt.py 保持一致：这次试 25 通道。
+    "n_channels": 25,
+    "hidden_dims": (768, 384),
     "h_c_range": (250.0, 1500.0),
     "t_r_range": (0.0, 1500.0),
-    "core_total_nm": 1200.0,
-    "core_total_range": (1000.0, 2000.0),
+    "core_total_nm": 1000.0,
+    "core_total_range": (800.0, 1800.0),
     "aspect_ratio_max": 10.0,
 }
 
@@ -140,10 +141,10 @@ def main() -> None:
     print(geometry_report(config))
     print()
 
-    # 波长网格 + 16 个通道的 D/P（在可行区间里均匀铺开）
+    # 波长网格 + n_channels 个通道的 D/P（在可行区间里均匀铺开）
     wl_nm = torch.linspace(400.0, 700.0, 151, device=device)
     limits = geometry_limits(config)
-    ratio = torch.linspace(limits["r_min"], limits["r_max"], 16, device=device)
+    ratio = torch.linspace(limits["r_min"], limits["r_max"], int(settings["n_channels"]), device=device)
 
     # ---- (1)(2) 层序快速对比：所有厚度先用四分之一波初值 ----
     print("层序快速对比（所有厚度先用四分之一波初值）：")
@@ -197,7 +198,7 @@ def main() -> None:
         plt.plot(wl_nm.detach().cpu(), t_init_0[idx].detach().cpu(), lw=1.0)
     plt.xlabel("Wavelength (nm)")
     plt.ylabel("Transmission")
-    plt.title("Initial 16-channel AR-EMT spectra, alpha=0 deg")
+    plt.title(f"Initial {t_init_0.shape[0]}-channel AR-EMT spectra, alpha=0 deg")
     plt.ylim(0.0, 1.05)
     plt.tight_layout()
     out_png = output_dir / "debug_initial_spectra_0deg.png"

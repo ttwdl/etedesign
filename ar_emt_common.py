@@ -3,14 +3,14 @@
 ===================== 这套代码到底在干嘛（先看这段）=====================
 我们想造一个“计算光谱仪”：
   1) 一束光（一条光谱 S(λ)，151 个波长点）打到一片“超表面滤光片阵列”上；
-  2) 阵列里有 16 个小滤光片，每个滤光片的透过谱 T_m(λ) 都不一样；
+  2) 阵列里有 C 个小滤光片，每个滤光片的透过谱 T_m(λ) 都不一样；
   3) 每个滤光片后面接一个探测器，读到的数就是“光谱 × 透过谱再求和”，
-     也就是把 151 维的光谱压缩成 16 个数（16 个测量值 y_m）；
-  4) 再用一个小神经网络（解码器 MLP）把这 16 个数还原回 151 维光谱 Ŝ(λ)。
+     也就是把 151 维的光谱压缩成 C 个数（C 个测量值 y_m）；
+  4) 再用一个小神经网络（解码器 MLP）把这 C 个数还原回 151 维光谱 Ŝ(λ)。
 
 “训练”同时优化两样东西：
-  - 物理结构（决定 16 条透过谱长什么样）；
-  - 解码器（决定怎么把 16 个数还原成光谱）。
+  - 物理结构（决定 C 条透过谱长什么样）；
+  - 解码器（决定怎么把 C 个数还原成光谱）。
 让还原出来的 Ŝ(λ) 尽量接近真实的 S(λ)。
 
 这个文件只放“多个脚本都会用到”的公共零件：
@@ -23,7 +23,7 @@
 单位约定：
   - 长度默认都是 nm；
   - 光谱 shape 默认是 [样本数, 波长点数]；
-  - 透过谱 shape 默认是 [通道数, 波长点数]，即 [16, 151]；
+  - 透过谱 shape 默认是 [通道数, 波长点数]，例如 [25, 151]；
   - 数据是“按图像位深缩放后的相对强度”，不做逐条光谱最大值归一化（保留明暗关系）。
 """
 
@@ -45,7 +45,7 @@ from torch import nn
 
 # =============================================================================
 # 第 1 部分：几何约束
-# 决定 16 个滤光片的柱径 D（相对周期 P 的比值 D/P）能取多大、多小。
+# 决定每个滤光片的柱径 D（相对周期 P 的比值 D/P）能取多大、多小。
 # =============================================================================
 
 
@@ -213,7 +213,7 @@ def emt_neff_from_ratio(
     """由 D/P 算 EMT 腔层的“等效折射率” n_eff。
 
     ratio:
-        [M]，M 是滤光片通道数（当前 16）。
+        [M]，M 是滤光片通道数。
     返回:
         [M, Nwl]，每个通道、每个波长一个 n_eff（复数张量）。
 
@@ -379,7 +379,7 @@ def tmm_transmission_unpolarized(
     device = wl.device
     n_wl = wl.numel()
 
-    # 有多少个“结构”（这里就是 16 个滤光片；n_eff、h_c、t_r 都可以按通道不同）
+    # 有多少个“结构”（这里就是 C 个滤光片；n_eff、h_c、t_r 都可以按通道不同）
     n_struct = 1
     for n in n_layers:
         if isinstance(n, torch.Tensor) and n.ndim == 2:
@@ -460,7 +460,7 @@ def build_ar_emt_transmission(
     wl_nm: torch.Tensor,
     alpha_deg: torch.Tensor | float,
 ) -> torch.Tensor:
-    """把结构参数拼成完整层序，调用 TMM 得到 16 个滤光片的透过谱。
+    """把结构参数拼成完整层序，调用 TMM 得到 C 个滤光片的透过谱。
 
     固定层序（从上到下）：
         空气 / top SiO2 / top TiO2 / 残余 SU-8 / EMT 腔 / bottom TiO2 / bottom SiO2 / 熔石英
@@ -475,11 +475,11 @@ def build_ar_emt_transmission(
     if ar.numel() != 4:
         raise ValueError("ar_thickness_nm 必须是 4 个数: top_L, top_H, bottom_H, bottom_L。")
 
-    n_eff = emt_neff_from_ratio(ratio, wl)  # [16, Nwl]，每个通道不同
+    n_eff = emt_neff_from_ratio(ratio, wl)  # [C, Nwl]，每个通道不同
     n_struct = ratio.numel()
 
     def const_layer(name: str) -> torch.Tensor:
-        # 16 个通道共享的常数折射率层，扩成 [16, Nwl]
+        # C 个通道共享的常数折射率层，扩成 [C, Nwl]
         return material_n(name, wl)[None, :].expand(n_struct, wl.numel())
 
     n_layers = [
@@ -507,11 +507,11 @@ def add_measurement_noise(
     rel_sigma: float = 0.0,
     abs_sigma: float = 0.0,
 ) -> torch.Tensor:
-    """给 16 通道测量值加噪声（只在训练时用，评估/推理保持干净）。
+    """给多通道测量值加噪声（只在训练时用，评估/推理保持干净）。
 
     为什么必须加噪声？
         真实探测器一定有噪声。如果只用“干净测量”训练，解码器会把
-        16→151 这个本来很病态的还原过程“背”得非常好，纸面 PSNR 很漂亮；
+        C→151 这个本来很病态的还原过程“背”得非常好，纸面 PSNR 很漂亮；
         但一上真实设备、测量一抖，重建就崩。训练时故意加噪，
         等于逼模型学会“抗噪的、稳健的”还原方式（也顺带起正则化作用）。
 
@@ -542,16 +542,16 @@ def add_measurement_noise(
 
 
 def measurement_matrix_coherence(transmission: torch.Tensor) -> torch.Tensor:
-    """衡量 16 条透过曲线彼此有多“像”（相关），返回一个标量，越小越好。
+    """衡量 C 条透过曲线彼此有多“像”（相关），返回一个标量，越小越好。
 
     为什么要管这个？
-        重建靠的是 16 个滤光片“看到不同的东西”。如果两个滤光片透过谱几乎一样，
-        它们提供的信息就重复了，等于只有更少的有效通道 → 16→151 更难还原。
-        所以我们希望这 16 条曲线尽量“形状各不相同、互相补充”。
+        重建靠的是多个滤光片“看到不同的东西”。如果两个滤光片透过谱几乎一样，
+        它们提供的信息就重复了，等于只有更少的有效通道 → C→151 更难还原。
+        所以我们希望这些曲线尽量“形状各不相同、互相补充”。
 
     做法（可导，能进 loss）：
         1. 把每条透过曲线归一化成单位长度（只看形状，不看亮度）；
-        2. 两两算余弦相似度，得到一个 16×16 的相似度矩阵，对角线都是 1；
+        2. 两两算余弦相似度，得到一个 C×C 的相似度矩阵，对角线都是 1；
         3. 取“非对角元素的均方”作为惩罚。越小 → 越正交 → 通道越互补。
 
     注意用的是“归一化后”的曲线，所以它只惩罚形状雷同，
@@ -564,7 +564,7 @@ def measurement_matrix_coherence(transmission: torch.Tensor) -> torch.Tensor:
     t = t.real if torch.is_complex(t) else t
 
     t_norm = t / (t.norm(dim=1, keepdim=True) + 1e-8)  # 每行单位化
-    gram = t_norm @ t_norm.t()                          # [16,16]，对角=1
+    gram = t_norm @ t_norm.t()                          # [C,C]，对角=1
     n = gram.shape[0]
     off = gram - torch.eye(n, device=gram.device, dtype=gram.dtype)  # 去掉对角
     return off.square().sum() / (n * (n - 1))
@@ -574,14 +574,14 @@ def differentiable_tor_percent(transmission: torch.Tensor) -> torch.Tensor:
     """可参与训练的 tor 指标，单位是百分比，越大表示通道越不一样。
 
     它和后面汇报用的 tor_percent 思路一致：
-    16 个通道两两比较，算 mean(|T_i - T_j|) * 100；
+    C 个通道两两比较，算 mean(|T_i - T_j|) * 100；
     然后取最小的那一对，表示“最像的两个通道仍然差多少”。
 
     tor_percent() 是给打印/评估用的，会 detach 到 CPU，不能反向传播；
     这里保留 torch 计算图，所以可以放进 loss 里推动滤光片拉开差异。
 
     如果 transmission 是 [B,16,151]，说明这一批每条光谱入射角不同；
-    这里先对 batch/角度取平均，得到一个代表性的 [16,151] 再算 tor。
+    这里先对 batch/角度取平均，得到一个代表性的 [C,151] 再算 tor。
     """
 
     t = transmission
@@ -624,13 +624,13 @@ class AREMTModel(nn.Module):
     前半（物理编码器）：
         ρ(raw) → D/P → D → 填充因子 f → n_eff；
         raw_h_c → 每通道 EMT 腔厚 h_c_l，同时 t_r_l = H_total - h_c_l；
-        n_eff + h_c_l + t_r_l → TMM → 16 条透过谱 → 16 个测量值。
+        n_eff + h_c_l + t_r_l → TMM → C 条透过谱 → C 个测量值。
     后半（MLP 解码器）：
-        16 个测量值 → 还原出 151 维光谱。
+        C 个测量值 → 还原出 151 维光谱。
 
     要点：
         当前输入是“一条光谱”，不是二维图像 patch，所以没有卷积、不学空间结构。
-        它学的是“单条光谱经过 16 个物理滤光片后，怎么还原回去”。
+        它学的是“单条光谱经过 C 个物理滤光片后，怎么还原回去”。
     """
 
     def __init__(
@@ -664,7 +664,7 @@ class AREMTModel(nn.Module):
         self.register_buffer("wl_nm", wl_nm.detach().clone().to(dtype=torch.float32))
 
         # ---- 可训练的物理参数（都存 raw，用 sigmoid 映射到物理区间）----
-        # 16 个通道的 D/P 初值在可行区间里均匀铺开，避免一开始 16 个滤光片全一样
+        # C 个通道的 D/P 初值在可行区间里均匀铺开，避免一开始所有滤光片全一样
         ratio_init = torch.linspace(
             self.r_min + 0.02 * (self.r_max - self.r_min),
             self.r_max - 0.02 * (self.r_max - self.r_min),
@@ -753,7 +753,7 @@ class AREMTModel(nn.Module):
         t_r_override: torch.Tensor | None = None,
         ar_override: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """算当前结构在指定入射角下的 16 条透过谱，返回 [角度数, 16, 151]。
+        """算当前结构在指定入射角下的 C 条透过谱，返回 [角度数, C, 151]。
 
         那几个 *_override 参数是给“制造误差评估”用的：
         评估时想临时把结构参数扰动一下（模拟加工误差），但不改动模型本身，
@@ -768,12 +768,12 @@ class AREMTModel(nn.Module):
         return build_ar_emt_transmission(ratio, h_c, t_r, ar, self.wl_nm, alpha_deg)
 
     def measure(self, spectra: torch.Tensor, transmission: torch.Tensor) -> torch.Tensor:
-        """用透过谱把输入光谱压成 16 个测量值：y_m = Σ_λ S(λ)·T_m(λ)。
+        """用透过谱把输入光谱压成 C 个测量值：y_m = Σ_λ S(λ)·T_m(λ)。
 
         spectra:      [B, 151]
-        transmission: [16, 151]（所有样本共用一组滤光片）
-                      或 [B, 16, 151]（每个样本入射角不同 → 每个样本一组滤光片）
-        返回:         [B, 16]
+        transmission: [C, 151]（所有样本共用一组滤光片）
+                      或 [B, C, 151]（每个样本入射角不同 → 每个样本一组滤光片）
+        返回:         [B, C]
 
         这里是“积分求和”，不除以 151——因为数据用的是绝对强度，
         我们想保留“光进来多少、探测器收多少”的真实数量关系。
@@ -815,6 +815,7 @@ def model_kwargs_from_settings(settings: dict | None) -> dict:
         settings = {}
 
     names = [
+        "n_channels",
         "hidden_dims",
         "h_c_range",
         "t_r_range",
@@ -899,7 +900,7 @@ def evaluate_fixed_angle(
 def tor_percent(t_matrix: torch.Tensor) -> float:
     """通道区分度 tor（只用于观察，不进 loss）。
 
-    做法：16 个通道两两比较，每对算 mean(|T_i - T_j|)·100，取最小值。
+    做法：C 个通道两两比较，每对算 mean(|T_i - T_j|)·100，取最小值。
     数值越大，说明“最像的那一对”也还挺不一样，即整体区分度好。
     （这是个直观指标；训练里真正推动区分度的是 measurement_matrix_coherence。）
     """

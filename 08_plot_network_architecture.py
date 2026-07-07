@@ -10,8 +10,8 @@
 这张图想讲清 5 件事：
 1. 输入是“一条光谱”，不是图像 patch；
 2. 光学编码器 = 可训练物理结构 + 可微 TMM；
-3. 16 个滤光片把 151 维光谱压成 16 维测量（训练时还会加噪声）；
-4. MLP 解码器（16→512→256→151，输出经 Softplus 保证非负）把测量重建回光谱；
+3. 25 个滤光片把 151 维光谱压成 25 维测量（训练时还会加噪声）；
+4. MLP 解码器（25→768→384→151，输出经 Softplus 保证非负）把测量重建回光谱；
 5. loss = MSE + L1 + diff_L1 + 光谱角 + 吞吐量约束 + 通道去相关 + tor 下限。
 
 注意：这张图纯手绘示意，改了模型结构记得也来这里同步文字，别让图“说谎”。
@@ -38,7 +38,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "output_dir": "results_recon_t06_tor25_50",
+    "output_dir": "results_25ch_t06_tor20_50",
     "output_stem": "network_architecture_ppt",
 }
 
@@ -83,13 +83,13 @@ def add_arrow(ax, start, end, text=None, curve=0.0, color="#333333", dashed=Fals
 
 
 def draw_decoder_nodes(ax) -> None:
-    """在解码器框里画 16 → 512 → 256 → 151 的四层全连接示意（只是示意，圆点数量不代表真实维度）。"""
+    """在解码器框里画 25 → 768 → 384 → 151 的四层全连接示意（只是示意，圆点数量不代表真实维度）。"""
 
     x_cols = [9.15, 9.70, 10.25, 10.80]          # 四列的横坐标
     y_nodes = {
-        "in":  [3.78, 3.62, 3.46, 3.30],          # 16
-        "h1":  [3.84, 3.68, 3.52, 3.36, 3.20],    # 512
-        "h2":  [3.84, 3.68, 3.52, 3.36, 3.20],    # 256
+        "in":  [3.78, 3.62, 3.46, 3.30],          # 25
+        "h1":  [3.84, 3.68, 3.52, 3.36, 3.20],    # 768
+        "h2":  [3.84, 3.68, 3.52, 3.36, 3.20],    # 384
         "out": [3.78, 3.62, 3.46, 3.30],          # 151
     }
     colors = ["#7fb3d5", "#f7dc6f", "#f5b041", "#82e0aa"]
@@ -108,7 +108,7 @@ def draw_decoder_nodes(ax) -> None:
                 ax.plot([x_cols[a], x_cols[a + 1]], [ya, yb], color="#888888", linewidth=0.4, alpha=0.5)
 
     # 每列下面标维度
-    for xi, label in zip(x_cols, ["16", "512", "256", "151"]):
+    for xi, label in zip(x_cols, ["25", "768", "384", "151"]):
         ax.text(xi, 3.03, label, ha="center", fontsize=10)
 
 
@@ -127,7 +127,7 @@ def main() -> None:
     # ---- 标题 ----
     ax.text(6.0, 5.72, "AR-EMT 端到端训练网络结构", ha="center", va="center", fontsize=24, weight="bold")
     ax.text(6.0, 5.42,
-            "输入是按位深缩放后的光谱强度；物理编码器给出 16 通道测量(训练时加噪)；MLP 输出重建 151 维光谱",
+            "输入是按位深缩放后的光谱强度；物理编码器给出 25 通道测量(训练时加噪)；MLP 输出重建 151 维光谱",
             ha="center", va="center", fontsize=13, color="#333333")
 
     # ---- 主干各个框 ----
@@ -135,16 +135,16 @@ def main() -> None:
             "S(λ)\nshape: [B,151]\nλ = 400-700 nm\n保留相对明暗\n不做逐条归一化", "#d6eaf8")
 
     add_box(ax, (2.45, 3.45), (2.45, 1.55), "可训练光学编码器",
-            "16 个滤光片\n每通道改变 D/P 和 h_c\n全局训练 H_total\n约束: h_c/D ≤ 10, t_r=H_total-h_c", "#fdebd0")
+            "25 个滤光片\n每通道改变 D/P 和 h_c\n全局训练 H_total\n约束: h_c/D ≤ 10, t_r=H_total-h_c", "#fdebd0")
 
     add_box(ax, (5.35, 3.45), (1.25, 1.55), "可微 TMM",
-            "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [16,151]", "#e8daef", title_size=12, body_size=9)
+            "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [25,151]", "#e8daef", title_size=12, body_size=9)
 
     add_box(ax, (7.05, 3.45), (1.45, 1.55), "光电测量 + 噪声",
-            "y_m = Σ S(λ)T_m(λ)\n积分求和\n训练时加噪声\nshape: [B,16]", "#d5f5e3", title_size=12, body_size=9)
+            "y_m = Σ S(λ)T_m(λ)\n积分求和\n训练时加噪声\nshape: [B,25]", "#d5f5e3", title_size=12, body_size=9)
 
     add_box(ax, (8.90, 3.00), (2.85, 2.00), "解码器 MLP",
-            "Linear: 16 → 512\nLinear: 512 → 256\nLeakyReLU(0.01)\nLinear: 256 → 151\nSoftplus 输出(≥0)", "#fcf3cf", body_size=9.5)
+            "Linear: 25 → 768\nLinear: 768 → 384\nLeakyReLU(0.01)\nLinear: 384 → 151\nSoftplus 输出(≥0)", "#fcf3cf", body_size=9.5)
     draw_decoder_nodes(ax)
 
     add_box(ax, (10.05, 1.35), (1.65, 1.10), "重建光谱",
@@ -158,7 +158,7 @@ def main() -> None:
             "     + λ_coh·通道去相关 + λ_tor·tor下限", "#f9e79f", body_size=9.5)
 
     add_box(ax, (0.55, 0.70), (2.55, 1.45), "会被更新的参数",
-            "编码器: ρ[16], H_total, h_c[16], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)
+            "编码器: ρ[25], H_total, h_c[25], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)
 
     add_box(ax, (7.85, 0.55), (2.85, 0.90), "训练/验证/测试",
             "train 更新参数, val 选 best。\ntest 只在 04 最终评估用。\n数据按“场景”划分, 互不串味。", "#ebedef", title_size=12, body_size=9.0)
@@ -167,7 +167,7 @@ def main() -> None:
     add_arrow(ax, (2.00, 4.25), (2.45, 4.25), "输入")
     add_arrow(ax, (4.90, 4.25), (5.35, 4.25), "结构参数")
     add_arrow(ax, (6.60, 4.25), (7.05, 4.25), "透过谱")
-    add_arrow(ax, (8.50, 4.25), (8.90, 4.25), "16维测量")
+    add_arrow(ax, (8.50, 4.25), (8.90, 4.25), "25维测量")
     add_arrow(ax, (10.90, 3.00), (10.90, 2.45), "输出")
     add_arrow(ax, (10.05, 1.90), (7.55, 1.45), "与真值比较", curve=-0.12)
 
@@ -176,7 +176,7 @@ def main() -> None:
     add_arrow(ax, (7.30, 1.45), (10.15, 3.00), "反向传播更新 MLP", curve=0.25, color="#2874a6", dashed=True)
 
     ax.text(6.0, 0.18,
-            "当前模型不是 CNN, 也不学空间邻域；它学的是“单条光谱经过 16 个物理滤光片后如何重建”。",
+            "当前模型不是 CNN, 也不学空间邻域；它学的是“单条光谱经过 25 个物理滤光片后如何重建”。",
             ha="center", va="center", fontsize=11, color="#333333")
 
     png_path = output_dir / f"{settings['output_stem']}.png"

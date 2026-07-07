@@ -7,7 +7,7 @@
 
 一句话流程：
   一条 151 维光谱 S(λ)
-    → 经过 16 个 AR-EMT 滤光片，得到 16 个测量值（可选：给测量值加噪声）
+    → 经过 n_channels 个 AR-EMT 滤光片，得到 n_channels 个测量值（可选：给测量值加噪声）
     → MLP 解码器还原出 151 维光谱 Ŝ(λ)
     → 让 Ŝ(λ) 尽量接近 S(λ)。
 
@@ -17,7 +17,7 @@
        + lambda_diff · 一阶差分 L1      (逼谱峰/谱形变化趋势对齐)
        + lambda_sam  · 光谱角      (轻微保住谱形，防止把峰抹平)
        + lambda_trans· 吞吐量惩罚  (别让滤光片整体太暗)
-       + lambda_coh  · 通道去相关  (让 16 个滤光片形状尽量互补, 重建更好还原)
+       + lambda_coh  · 通道去相关  (让滤光片形状尽量互补, 重建更好还原)
        + lambda_tor  · tor 下限约束 (让最相似的两个通道也至少拉开一点)
 
 约定：
@@ -71,9 +71,9 @@ USER_SETTINGS = {
     # ---- 路径 ----
     # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "checkpoint_dir": "checkpoints_recon_t06_tor25_50",
-    "results_dir": "results_recon_t06_tor25_50",
-    "tensorboard_dir": "runs/ar_emt_recon_t06_tor25_50",
+    "checkpoint_dir": "checkpoints_25ch_t06_tor20_50",
+    "results_dir": "results_25ch_t06_tor20_50",
+    "tensorboard_dir": "runs/ar_emt_25ch_t06_tor20_50",
 
     # ---- 设备 / 复现 ----
     "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
@@ -93,14 +93,15 @@ USER_SETTINGS = {
     "angle_max_deg": 5.0,
 
     # ---- 可训练物理结构范围 ----
-    # H_total = h_c_l + t_r_l，是 16 个通道共享的“总腔长”，训练时会整体一起变。
+    # H_total = h_c_l + t_r_l，是所有通道共享的“总腔长”，训练时会整体一起变。
     # h_c_l 是每个通道自己的 EMT 腔厚，t_r_l 不单独训练，而是用 H_total - h_c_l 自动算。
     # aspect_ratio_max 控制 TiO2 柱最大深宽比：h_c_l / D_l <= 10，避免柱子太高太细。
-    "hidden_dims": (512, 256),
+    "n_channels": 25,              # 25 个滤光片，对应 5x5 超像素；比 16 通道多 9 个测量值
+    "hidden_dims": (768, 384),     # 25 通道输入更宽，解码器也稍微加宽
     "h_c_range": (250.0, 1500.0),
     "t_r_range": (0.0, 1500.0),
-    "core_total_nm": 1200.0,
-    "core_total_range": (1000.0, 2000.0),
+    "core_total_nm": 1000.0,
+    "core_total_range": (800.0, 1800.0),
     "aspect_ratio_max": 10.0,
 
     # ---- 测量噪声（重要）----
@@ -117,7 +118,7 @@ USER_SETTINGS = {
     "lambda_sam": 0.05,     # 光谱角权重：轻微保住谱形；不想要就设 0
     "lambda_l1": 0.10,      # 逐点 L1 权重：逼每个波长点更贴近
     "lambda_diff": 0.20,    # 一阶差分 L1 权重：逼曲线起伏、谱峰边缘更贴近
-    "tor_target_percent": 2.5,  # 希望最相似的两个滤光片也至少相差约 2.5%
+    "tor_target_percent": 2.0,  # 25 通道里“最像的一对”更难拉开，先用 2% 避免过度牺牲重建
     "lambda_tor": 0.01,         # tor 下限约束权重；先温和开，太大会牺牲重建精度
 
     # ---- 优化器 ----
@@ -304,7 +305,7 @@ def save_structure_csv(model: AREMTModel, path: Path) -> None:
 
 
 def make_spectra_figure(model: AREMTModel) -> plt.Figure:
-    """画当前 16 个通道的 0 度透过谱。"""
+    """画当前所有通道的 0 度透过谱。"""
 
     device = next(model.parameters()).device
     with torch.no_grad():
@@ -316,7 +317,7 @@ def make_spectra_figure(model: AREMTModel) -> plt.Figure:
         plt.plot(wl, t0[idx], lw=1.0)
     plt.xlabel("Wavelength (nm)")
     plt.ylabel("Transmission")
-    plt.title("Current 16-channel spectra, alpha=0 deg")
+    plt.title(f"Current {t0.shape[0]}-channel spectra, alpha=0 deg")
     plt.ylim(0.0, 1.05)
     plt.tight_layout()
     return fig
@@ -489,9 +490,9 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
 
         # ---------------- 前向：把物理和网络串起来 ----------------
         # 这几步故意写开，方便你看清数据怎么一步步变过去：
-        t = model.transmission(alpha)                                 # 16 条透过谱 [A,16,151]
+        t = model.transmission(alpha)                                 # n_channels 条透过谱 [A,C,151]
         t_use = t[0] if t.shape[0] == 1 else t                        # 供 measure 用的形状
-        meas = model.measure(batch, t_use)                            # 压成 16 个测量值 [B,16]
+        meas = model.measure(batch, t_use)                            # 压成 C 个测量值 [B,C]
         meas = add_measurement_noise(meas, settings["noise_rel"], settings["noise_abs"])  # 训练时加噪
         pred = model.decoder(meas)                                    # 还原回 151 维 [B,151]
 
@@ -516,7 +517,7 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
             loss = loss + settings["lambda_trans"] * loss_trans
 
         coh = measurement_matrix_coherence(t_use)                    # 通道相关性(越小越好)
-        if settings["lambda_coh"] > 0:                              # 去相关约束：逼 16 个滤光片互补
+        if settings["lambda_coh"] > 0:                              # 去相关约束：逼滤光片互补
             loss = loss + settings["lambda_coh"] * coh
 
         tor_train = differentiable_tor_percent(t_use)                # 可导 tor，单位 %
@@ -626,6 +627,7 @@ def main() -> None:
     writer = SummaryWriter(log_dir=settings["tensorboard_dir"]) if settings["use_tensorboard"] else None
 
     print(f"device={device}")
+    print(f"channels={settings['n_channels']}, hidden_dims={settings['hidden_dims']}")
     print(f"epochs={settings['epochs']}, batch_size={settings['batch_size']}, angle_mode={settings['angle_mode']}")
     print(f"noise: rel={settings['noise_rel']}, abs={settings['noise_abs']} | "
           f"lambda: trans={settings['lambda_trans']}, coh={settings['lambda_coh']}, "

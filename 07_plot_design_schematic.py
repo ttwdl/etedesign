@@ -4,9 +4,9 @@
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 07_plot_design_schematic.py
 
 输出:
-  results_recon_t06_tor25_50/design_schematic.png
+  results_25ch_t06_tor20_50/design_schematic.png
 
-这张图分三块：左=纵向层结构，右上=4x4 滤光片 D/h_c 分布，下=0 度透过谱。
+这张图分三块：左=纵向层结构，右上=滤光片 D/h_c 分布，下=0 度透过谱。
 注意：图不是按真实厚度比例画的（EMT 腔几百 nm，AR 层几十 nm，按真实比例会看不清），
      但图上标注的数值都是真实训练值。
 """
@@ -36,8 +36,8 @@ from ar_emt_common import AREMTModel, GeometryConfig, model_kwargs_from_settings
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints_recon_t06_tor25_50/ar_emt_best.pt",
-    "output_png": "results_recon_t06_tor25_50/design_schematic.png",
+    "checkpoint": "checkpoints_25ch_t06_tor20_50/ar_emt_best.pt",
+    "output_png": "results_25ch_t06_tor20_50/design_schematic.png",
 }
 
 
@@ -138,43 +138,51 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
 
 
 def draw_channel_layout(ax, model: AREMTModel) -> None:
-    """画 4x4 个滤光片的柱径和 EMT 腔厚分布。"""
+    """画所有滤光片的柱径和 EMT 腔厚分布。
+
+    16 通道会自动画成 4x4，25 通道会自动画成 5x5。
+    """
 
     rows = structure_rows(model)
-    d_values = np.array([r["D_nm"] for r in rows]).reshape(4, 4)
-    gap_values = np.array([r["gap_nm"] for r in rows]).reshape(4, 4)
-    hc_values = np.array([r["h_c_nm"] for r in rows]).reshape(4, 4)
-    tr_values = np.array([r["t_r_nm"] for r in rows]).reshape(4, 4)
+    n_channels = len(rows)
+    n_cols = int(np.ceil(np.sqrt(n_channels)))
+    n_rows = int(np.ceil(n_channels / n_cols))
+    d_values = np.array([r["D_nm"] for r in rows])
+    gap_values = np.array([r["gap_nm"] for r in rows])
+    hc_values = np.array([r["h_c_nm"] for r in rows])
+    tr_values = np.array([r["t_r_nm"] for r in rows])
     period = model.config.period_nm
 
     ax.set_aspect("equal")
-    ax.set_xlim(0, 4); ax.set_ylim(0, 4)
+    ax.set_xlim(0, n_cols); ax.set_ylim(0, n_rows)
     ax.invert_yaxis()
-    ax.set_title("4x4 filters: D and h_c change, shared H_total")
+    ax.set_title(f"{n_channels} filters: D and h_c change, shared H_total")
 
-    for i in range(4):
-        for j in range(4):
-            x, y = j, i
-            ax.add_patch(Rectangle((x, y), 1, 1, facecolor="#f7f7f7", edgecolor="black", linewidth=0.8))
-            radius = 0.38 * d_values[i, j] / d_values.max()   # 圆点大小按柱径归一化
-            ax.add_patch(Circle((x + 0.5, y + 0.42), radius, facecolor="#e6550d", edgecolor="#7f2704"))
-            ch = i * 4 + j
-            ax.text(
-                x + 0.5,
-                y + 0.78,
-                f"ch{ch}\nD={d_values[i,j]:.0f} G={gap_values[i,j]:.0f}\n"
-                f"h={hc_values[i,j]:.0f} r={tr_values[i,j]:.0f}",
-                ha="center",
-                va="center",
-                fontsize=7,
-            )
+    for ch in range(n_rows * n_cols):
+        i = ch // n_cols
+        j = ch % n_cols
+        x, y = j, i
+        ax.add_patch(Rectangle((x, y), 1, 1, facecolor="#f7f7f7", edgecolor="black", linewidth=0.8))
+        if ch >= n_channels:
+            continue
+        radius = 0.38 * d_values[ch] / d_values.max()   # 圆点大小按柱径归一化
+        ax.add_patch(Circle((x + 0.5, y + 0.40), radius, facecolor="#e6550d", edgecolor="#7f2704"))
+        ax.text(
+            x + 0.5,
+            y + 0.78,
+            f"ch{ch}\nD={d_values[ch]:.0f} G={gap_values[ch]:.0f}\n"
+            f"h={hc_values[ch]:.0f} r={tr_values[ch]:.0f}",
+            ha="center",
+            va="center",
+            fontsize=6.0 if n_channels > 16 else 7.0,
+        )
 
-    ax.text(2, 4.25, f"Period P = {period:.1f} nm", ha="center", fontsize=9)
+    ax.text(n_cols / 2, n_rows + 0.25, f"Period P = {period:.1f} nm", ha="center", fontsize=9)
     ax.set_xticks([]); ax.set_yticks([])
 
 
 def draw_spectra(ax, model: AREMTModel) -> None:
-    """画 0 度透过谱（16 条曲线）。"""
+    """画 0 度透过谱。"""
 
     with torch.no_grad():
         t0 = model.transmission(torch.tensor([0.0]))[0].detach().cpu().numpy()
@@ -198,7 +206,7 @@ def main() -> None:
     out_path = Path(settings["output_png"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig = plt.figure(figsize=(13, 9))
+    fig = plt.figure(figsize=(14, 9.5))
     gs = fig.add_gridspec(2, 2, height_ratios=[1.05, 1.0], width_ratios=[1.0, 1.2])
     ax_stack = fig.add_subplot(gs[0, 0])
     ax_layout = fig.add_subplot(gs[0, 1])
