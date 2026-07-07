@@ -9,10 +9,10 @@ __pycache__/
 .agents/
 
 # 训练输出：这些文件会很大，而且每次训练都会变
-checkpoints/
-results/
-results_infer/
-runs/
+# 带 * 是为了覆盖 checkpoints_flat_hc_50、results_l1diff_50、results_infer_xxx 等实验目录。
+checkpoints*/
+results*/
+runs*/
 
 # 本地数据缓存
 data_cache*/

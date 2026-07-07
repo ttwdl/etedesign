@@ -154,13 +154,19 @@ def main() -> None:
     loss.backward()   # 只要能 backward 且各参数 grad 不为 0，就说明结构参数可训练
     print(f"  mean(T) = {float(loss.detach()):.6f}")
     print(f"  rho grad norm       = {float(model.rho.grad.norm()):.6e}")
-    print(f"  h_c grad            = {float(model.raw_h_c.grad):.6e}")
-    print(f"  t_r grad            = {float(model.raw_t_r.grad):.6e}")
+    print(f"  h_c grad norm       = {float(model.raw_h_c.grad.norm()):.6e}")
+    print("  t_r 不再单独训练：t_r_l = H_total - h_c_l，所以它的梯度等价地走到 h_c_l 上。")
     print(f"  AR thickness grad   = {float(model.raw_ar.grad.norm()):.6e}")
     print()
 
     # ---- (4) 存初始透过谱图 ----
     params = model.physical_parameters()
+    h_c = params["h_c_nm"].detach().cpu()
+    t_r = params["t_r_nm"].detach().cpu()
+    core_total = float(params["core_total_nm"].detach().cpu())
+    print(f"初始平整约束: h_c=[{float(h_c.min()):.2f}, {float(h_c.max()):.2f}] nm, "
+          f"t_r=[{float(t_r.min()):.2f}, {float(t_r.max()):.2f}] nm, "
+          f"h_c+t_r={core_total:.2f} nm")
     t_init_0 = build_ar_emt_transmission(
         params["ratio"], params["h_c_nm"], params["t_r_nm"], params["ar_nm"],
         wl_nm, torch.tensor([0.0], device=device),

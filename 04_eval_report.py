@@ -3,7 +3,7 @@
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 04_eval_report.py
 
-它会读取 checkpoints/ar_emt_best.pt 和 test_spectra.npy，然后输出：
+它会读取 checkpoints_flat_hc_50/ar_emt_best.pt 和 test_spectra.npy，然后输出：
   - 不同入射角下的重建精度表（eval_angles.csv）；
   - 结构参数表（eval_structure.csv）；
   - 制造误差 Monte Carlo（eval_fabrication_mc.csv）；
@@ -49,9 +49,9 @@ from ar_emt_common import (
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints_l1diff_50/ar_emt_best.pt",
+    "checkpoint": "checkpoints_flat_hc_50/ar_emt_best.pt",
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "output_dir": "results_l1diff_50",
+    "output_dir": "results_flat_hc_50",
     "device": "cuda",
 
     "test_size": 0,   # 0 表示用 test_spectra.npy 的全部数据
@@ -154,13 +154,13 @@ def run_mc_fabrication(model: AREMTModel, spectra: torch.Tensor, n_mc: int, seed
 
     当前扰动幅度（第一版工艺误差假设，以后按真实工艺能力改）：
     - D    : ±3 nm
-    - h_c  : ±2 nm
-    - t_r  : ±5 nm
+    - h_c  : ±2 nm，随后令 t_r = H_total - h_c，保持总厚度平整
     - AR 4层: ±2 nm
     """
 
     if n_mc <= 0:
-        return {"mse": float("nan"), "psnr": float("nan"), "sam": float("nan")}
+        return {"mse": float("nan"), "l1": float("nan"), "diff_l1": float("nan"),
+                "psnr": float("nan"), "sam": float("nan")}
 
     device = next(model.parameters()).device
     gen = torch.Generator(device=device)
@@ -169,7 +169,7 @@ def run_mc_fabrication(model: AREMTModel, spectra: torch.Tensor, n_mc: int, seed
     params = model.physical_parameters()
     base_ratio = params["ratio"].detach()
     base_hc = params["h_c_nm"].detach()
-    base_tr = params["t_r_nm"].detach()
+    core_total = float(params["core_total_nm"].detach().cpu())
     base_ar = params["ar_nm"].detach()
     period = model.config.period_nm
 
@@ -178,13 +178,16 @@ def run_mc_fabrication(model: AREMTModel, spectra: torch.Tensor, n_mc: int, seed
         # D 的 ±3nm 扰动换算成 D/P 的扰动(除以周期)
         d_delta = (torch.rand(base_ratio.shape, generator=gen, device=device) * 6.0 - 3.0) / period
         ratio = torch.clamp(base_ratio + d_delta, model.r_min, model.r_max)
-        h_c = torch.clamp(base_hc + (torch.rand((), generator=gen, device=device) * 4.0 - 2.0), *model.h_c_range)
-        t_r = torch.clamp(base_tr + (torch.rand((), generator=gen, device=device) * 10.0 - 5.0), *model.t_r_range)
+        h_c_noise = torch.rand(base_hc.shape, generator=gen, device=device) * 4.0 - 2.0
+        h_c = torch.clamp(base_hc + h_c_noise, *model.h_c_effective_range)
+        t_r = core_total - h_c
         ar = torch.clamp(base_ar + (torch.rand(base_ar.shape, generator=gen, device=device) * 4.0 - 2.0), *model.ar_range)
         rows.append(evaluate_with_overrides(model, spectra, 0.0, ratio, h_c, t_r, ar, batch_size))
 
     return {
         "mse": float(np.mean([r["mse"] for r in rows])),
+        "l1": float(np.mean([r["l1"] for r in rows])),
+        "diff_l1": float(np.mean([r["diff_l1"] for r in rows])),
         "psnr": float(np.mean([r["psnr"] for r in rows])),
         "sam": float(np.mean([r["sam"] for r in rows])),
     }
@@ -281,7 +284,8 @@ def main() -> None:
     mc_metrics = run_mc_fabrication(model, test, n_mc=settings["mc"], seed=settings["seed"] + 100,
                                     batch_size=settings["batch_size"])
     save_csv([{"mc_count": settings["mc"], **mc_metrics}], output_dir / "eval_fabrication_mc.csv")
-    print(f"  平均 | mse={mc_metrics['mse']:.6e} | psnr={mc_metrics['psnr']:.2f} | sam={mc_metrics['sam']:.4f}")
+    print(f"  平均 | mse={mc_metrics['mse']:.6e} | l1={mc_metrics['l1']:.6e} | "
+          f"diff={mc_metrics['diff_l1']:.6e} | psnr={mc_metrics['psnr']:.2f} | sam={mc_metrics['sam']:.4f}")
 
     # ---- 测量噪声鲁棒性 ----
     print()

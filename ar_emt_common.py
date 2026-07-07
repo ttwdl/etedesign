@@ -379,7 +379,7 @@ def tmm_transmission_unpolarized(
     device = wl.device
     n_wl = wl.numel()
 
-    # 有多少个“结构”（这里就是 16 个滤光片；它们只有 EMT 层的 n_eff 不同）
+    # 有多少个“结构”（这里就是 16 个滤光片；n_eff、h_c、t_r 都可以按通道不同）
     n_struct = 1
     for n in n_layers:
         if isinstance(n, torch.Tensor) and n.ndim == 2:
@@ -464,7 +464,8 @@ def build_ar_emt_transmission(
 
     固定层序（从上到下）：
         空气 / top SiO2 / top TiO2 / 残余 SU-8 / EMT 腔 / bottom TiO2 / bottom SiO2 / 熔石英
-    只有 EMT 腔那一层的折射率随通道(D/P)变化，其它层 16 个通道共享。
+    EMT 腔那一层的折射率随通道(D/P)变化；h_c 和 t_r 也可以是每通道不同。
+    当前模型默认让 h_c_l + t_r_l 恒定，所以内部占比变了，但总厚度仍然平整。
     """
 
     wl = wl_nm.to(dtype=torch.float32)
@@ -592,7 +593,9 @@ class AREMTModel(nn.Module):
     """AR-EMT 可训练模型。
 
     前半（物理编码器）：
-        ρ(raw) → D/P → D → 填充因子 f → n_eff → TMM → 16 条透过谱 → 16 个测量值。
+        ρ(raw) → D/P → D → 填充因子 f → n_eff；
+        raw_h_c → 每通道 EMT 腔厚 h_c_l，同时 t_r_l = H_total - h_c_l；
+        n_eff + h_c_l + t_r_l → TMM → 16 条透过谱 → 16 个测量值。
     后半（MLP 解码器）：
         16 个测量值 → 还原出 151 维光谱。
 
@@ -607,8 +610,9 @@ class AREMTModel(nn.Module):
         config: GeometryConfig,
         n_channels: int = 16,
         hidden_dims: tuple[int, ...] = (512, 256),  # 解码器隐藏层：可自由加深/加宽（改了要重新训练）
-        h_c_range: tuple[float, float] = (300.0, 1200.0),
-        t_r_range: tuple[float, float] = (0.0, 150.0),
+        h_c_range: tuple[float, float] = (350.0, 650.0),
+        t_r_range: tuple[float, float] = (0.0, 300.0),
+        core_total_nm: float = 650.0,
         ar_range: tuple[float, float] = (5.0, 160.0),
     ) -> None:
         super().__init__()
@@ -617,6 +621,7 @@ class AREMTModel(nn.Module):
         self.hidden_dims = hidden_dims
         self.h_c_range = h_c_range
         self.t_r_range = t_r_range
+        self.core_total_nm = float(core_total_nm)
         self.ar_range = ar_range
 
         limits = geometry_limits(config)
@@ -635,9 +640,23 @@ class AREMTModel(nn.Module):
         )
         self.rho = nn.Parameter(raw_from_bounded(ratio_init, self.r_min, self.r_max))
 
-        # 下面三组厚度是“全局共享”的：16 个滤光片用同一套厚度，只有 D/P 各不相同
-        self.raw_h_c = nn.Parameter(raw_from_bounded(600.0, *h_c_range))              # EMT 腔厚
-        self.raw_t_r = nn.Parameter(raw_from_bounded(50.0, *t_r_range))               # 残余 SU-8 厚
+        # 每个通道有自己的 EMT 腔厚 h_c_l；残余 SU-8 厚度不单独训练，
+        # 而是由 t_r_l = core_total_nm - h_c_l 自动算出来。
+        # 这样 16 个通道的内部比例不同，光谱调制更强；但 h_c_l + t_r_l 恒定，整体仍然平整。
+        h_c_min = max(float(h_c_range[0]), self.core_total_nm - float(t_r_range[1]))
+        h_c_max = min(float(h_c_range[1]), self.core_total_nm - float(t_r_range[0]))
+        if h_c_min >= h_c_max:
+            raise ValueError(
+                "h_c_range / t_r_range / core_total_nm 不兼容："
+                f"得到的 h_c 可行区间为 [{h_c_min}, {h_c_max}]。"
+            )
+        self.h_c_effective_range = (h_c_min, h_c_max)
+        h_c_init = torch.linspace(
+            h_c_min + 0.05 * (h_c_max - h_c_min),
+            h_c_max - 0.05 * (h_c_max - h_c_min),
+            n_channels,
+        )
+        self.raw_h_c = nn.Parameter(raw_from_bounded(h_c_init, h_c_min, h_c_max))      # 每通道 EMT 腔厚
         self.raw_ar = nn.Parameter(raw_from_bounded(quarter_wave_ar_thickness(), *ar_range))  # 4 个 AR 层厚
 
         # ---- 解码器 MLP：16 → ...隐藏层... → 151 ----
@@ -657,10 +676,11 @@ class AREMTModel(nn.Module):
         """把 raw 参数换算成有物理意义的量（D/P、各层厚度，单位 nm）。"""
 
         ratio = bounded_value(self.rho, self.r_min, self.r_max)
-        h_c = bounded_value(self.raw_h_c, *self.h_c_range)
-        t_r = bounded_value(self.raw_t_r, *self.t_r_range)
+        h_c = bounded_value(self.raw_h_c, *self.h_c_effective_range)
+        t_r = self.core_total_nm - h_c
         ar = bounded_value(self.raw_ar, *self.ar_range)
-        return {"ratio": ratio, "h_c_nm": h_c, "t_r_nm": t_r, "ar_nm": ar}
+        core_total = torch.as_tensor(self.core_total_nm, dtype=h_c.dtype, device=h_c.device)
+        return {"ratio": ratio, "h_c_nm": h_c, "t_r_nm": t_r, "core_total_nm": core_total, "ar_nm": ar}
 
     def transmission(
         self,
@@ -795,10 +815,17 @@ def tor_percent(t_matrix: torch.Tensor) -> float:
 
 
 def structure_rows(model: AREMTModel) -> list[dict[str, float]]:
-    """导出每个通道的结构参数（D/P、D、gap、填充因子、n_eff 范围），方便存 CSV。"""
+    """导出每个通道的结构参数，方便存 CSV。
+
+    这里会明确写出 h_c_nm、t_r_nm 和 core_total_nm，方便你检查：
+    每个通道的内部比例不同，但 h_c + t_r 保持同一个总厚度。
+    """
 
     params = model.physical_parameters()
     ratio = params["ratio"].detach().cpu()
+    h_c = params["h_c_nm"].detach().cpu()
+    t_r = params["t_r_nm"].detach().cpu()
+    core_total = float(params["core_total_nm"].detach().cpu())
     period = model.config.period_nm
     wl = model.wl_nm.detach().cpu()
     neff = emt_neff_from_ratio(ratio, wl).real.detach().cpu()
@@ -814,6 +841,9 @@ def structure_rows(model: AREMTModel) -> list[dict[str, float]]:
                 "D_nm": d_nm,
                 "gap_nm": gap_nm,
                 "fill_factor": f,
+                "h_c_nm": float(h_c[idx]),
+                "t_r_nm": float(t_r[idx]),
+                "core_total_nm": core_total,
                 "neff_min": float(neff[idx].min()),
                 "neff_max": float(neff[idx].max()),
             }

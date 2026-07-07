@@ -12,7 +12,7 @@
 2. 光学编码器 = 可训练物理结构 + 可微 TMM；
 3. 16 个滤光片把 151 维光谱压成 16 维测量（训练时还会加噪声）；
 4. MLP 解码器（16→512→256→151，输出经 Softplus 保证非负）把测量重建回光谱；
-5. loss = MSE + 光谱角 + 吞吐量约束 + 通道去相关（后三项都可单独开关）。
+5. loss = MSE + L1 + diff_L1 + 光谱角 + 吞吐量约束 + 通道去相关。
 
 注意：这张图纯手绘示意，改了模型结构记得也来这里同步文字，别让图“说谎”。
 """
@@ -38,7 +38,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "output_dir": "results",
+    "output_dir": "results_flat_hc_50",
     "output_stem": "network_architecture_ppt",
 }
 
@@ -135,7 +135,7 @@ def main() -> None:
             "S(λ)\nshape: [B,151]\nλ = 400-700 nm\n保留相对明暗\n不做逐条归一化", "#d6eaf8")
 
     add_box(ax, (2.45, 3.45), (2.45, 1.55), "可训练光学编码器",
-            "16 个滤光片\n每通道只改变 D/P\nρ → r=D/P → D → f → n_eff\n共享厚度: h_c, t_r, AR 层", "#fdebd0")
+            "16 个滤光片\n每通道改变 D/P 和 h_c\nρ → r=D/P → D → f → n_eff\n约束: h_c + t_r = 常数", "#fdebd0")
 
     add_box(ax, (5.35, 3.45), (1.25, 1.55), "可微 TMM",
             "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [16,151]", "#e8daef", title_size=12, body_size=9)
@@ -152,12 +152,12 @@ def main() -> None:
 
     # ---- 训练目标 / 参数 / 数据划分 ----
     add_box(ax, (3.30, 0.70), (4.25, 1.45), "训练目标 (loss)",
-            "loss = MSE(Ŝ, S)\n     + λ_sam · 光谱角(保住谱形)\n"
-            "     + λ_trans · max(0, T_target − T_mean)²  (吞吐量)\n"
-            "     + λ_coh · 通道去相关(让16个滤光片互补)\n后三项可单独设 0 关闭", "#f9e79f", body_size=9.5)
+            "loss = MSE(Ŝ,S) + λ_l1·L1\n"
+            "     + λ_diff·一阶差分L1 + λ_sam·光谱角\n"
+            "     + λ_trans·吞吐量惩罚\n     + λ_coh·通道去相关", "#f9e79f", body_size=9.5)
 
     add_box(ax, (0.55, 0.70), (2.55, 1.45), "会被更新的参数",
-            "编码器: ρ[16], h_c, t_r, AR[4]\n解码器: 三个 Linear 的权重/偏置\n优化器: AdamW + 梯度裁剪\n结构参数学习率更小", "#fadbd8", body_size=9.0)
+            "编码器: ρ[16], h_c[16], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)
 
     add_box(ax, (7.85, 0.55), (2.85, 0.90), "训练/验证/测试",
             "train 更新参数, val 选 best。\ntest 只在 04 最终评估用。\n数据按“场景”划分, 互不串味。", "#ebedef", title_size=12, body_size=9.0)

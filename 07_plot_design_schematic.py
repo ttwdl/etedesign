@@ -4,9 +4,9 @@
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 07_plot_design_schematic.py
 
 输出:
-  results/design_schematic.png
+  results_flat_hc_50/design_schematic.png
 
-这张图分三块：左=纵向层结构，右上=4x4 滤光片柱径分布，下=0 度透过谱。
+这张图分三块：左=纵向层结构，右上=4x4 滤光片 D/h_c 分布，下=0 度透过谱。
 注意：图不是按真实厚度比例画的（EMT 腔几百 nm，AR 层几十 nm，按真实比例会看不清），
      但图上标注的数值都是真实训练值。
 """
@@ -36,8 +36,8 @@ from ar_emt_common import AREMTModel, GeometryConfig, structure_rows
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints/ar_emt_best.pt",
-    "output_png": "results/design_schematic.png",
+    "checkpoint": "checkpoints_flat_hc_50/ar_emt_best.pt",
+    "output_png": "results_flat_hc_50/design_schematic.png",
 }
 
 
@@ -61,14 +61,22 @@ def load_model(checkpoint_path: Path) -> AREMTModel:
 
 
 def draw_layer_stack(ax, model: AREMTModel) -> None:
-    """画纵向层结构：空气 / SiO2 / TiO2 / 残余SU-8 / EMT腔 / TiO2 / SiO2 / 熔石英。"""
+    """画纵向层结构。
+
+    新模型里每个通道的 h_c / t_r 可以不同，但 h_c + t_r 固定。
+    这张剖面图取中间通道做代表，并在文字里标出全通道范围。
+    """
 
     params = model.physical_parameters()
     ar = params["ar_nm"].detach().cpu().numpy()
-    h_c = float(params["h_c_nm"].detach().cpu())
-    t_r = float(params["t_r_nm"].detach().cpu())
+    h_c_all = params["h_c_nm"].detach().cpu().numpy()
+    t_r_all = params["t_r_nm"].detach().cpu().numpy()
+    core_total = float(params["core_total_nm"].detach().cpu())
+    mid_ch = len(h_c_all) // 2
+    h_c = float(h_c_all[mid_ch])
+    t_r = float(t_r_all[mid_ch])
     rows = structure_rows(model)
-    d_mid = rows[len(rows) // 2]["D_nm"]   # 取中间通道的柱径，画 EMT 腔里的柱子示意
+    d_mid = rows[mid_ch]["D_nm"]   # 取中间通道的柱径，画 EMT 腔里的柱子示意
     period = model.config.period_nm
 
     # 从上到下的层（名字, 厚度nm, 颜色）
@@ -109,25 +117,37 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
                                facecolor="#e6550d", edgecolor="#7f2704", linewidth=0.6))
     ax.text(x0 + width / 2, cy + ch / 2, "SU-8 fills gaps\nTiO2 pillars",
             ha="center", va="center", fontsize=9, color="black")
+    ax.text(
+        x0,
+        y + 0.02,
+        f"shown: ch{mid_ch}; all channels keep h_c + t_r = {core_total:.1f} nm\n"
+        f"h_c range {h_c_all.min():.1f}-{h_c_all.max():.1f} nm, "
+        f"t_r range {t_r_all.min():.1f}-{t_r_all.max():.1f} nm",
+        ha="left",
+        va="bottom",
+        fontsize=8,
+    )
 
     ax.set_xlim(0, 1.85)
-    ax.set_ylim(-0.45, y + 0.45)
+    ax.set_ylim(-0.45, y + 0.70)
     ax.set_title("Vertical stack")
     ax.axis("off")
 
 
 def draw_channel_layout(ax, model: AREMTModel) -> None:
-    """画 4x4 个滤光片的柱径分布（16 个通道只有 D 不同，圆点越大柱径越大）。"""
+    """画 4x4 个滤光片的柱径和 EMT 腔厚分布。"""
 
     rows = structure_rows(model)
     d_values = np.array([r["D_nm"] for r in rows]).reshape(4, 4)
     gap_values = np.array([r["gap_nm"] for r in rows]).reshape(4, 4)
+    hc_values = np.array([r["h_c_nm"] for r in rows]).reshape(4, 4)
+    tr_values = np.array([r["t_r_nm"] for r in rows]).reshape(4, 4)
     period = model.config.period_nm
 
     ax.set_aspect("equal")
     ax.set_xlim(0, 4); ax.set_ylim(0, 4)
     ax.invert_yaxis()
-    ax.set_title("4x4 filters: only D changes")
+    ax.set_title("4x4 filters: D and h_c change, h_c+t_r fixed")
 
     for i in range(4):
         for j in range(4):
@@ -136,8 +156,15 @@ def draw_channel_layout(ax, model: AREMTModel) -> None:
             radius = 0.38 * d_values[i, j] / d_values.max()   # 圆点大小按柱径归一化
             ax.add_patch(Circle((x + 0.5, y + 0.42), radius, facecolor="#e6550d", edgecolor="#7f2704"))
             ch = i * 4 + j
-            ax.text(x + 0.5, y + 0.78, f"ch{ch}\nD={d_values[i,j]:.1f} nm\nG={gap_values[i,j]:.1f}",
-                    ha="center", va="center", fontsize=8)
+            ax.text(
+                x + 0.5,
+                y + 0.78,
+                f"ch{ch}\nD={d_values[i,j]:.0f} G={gap_values[i,j]:.0f}\n"
+                f"h={hc_values[i,j]:.0f} r={tr_values[i,j]:.0f}",
+                ha="center",
+                va="center",
+                fontsize=7,
+            )
 
     ax.text(2, 4.25, f"Period P = {period:.1f} nm", ha="center", fontsize=9)
     ax.set_xticks([]); ax.set_yticks([])
