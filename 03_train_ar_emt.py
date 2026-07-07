@@ -11,14 +11,16 @@
     → MLP 解码器还原出 151 维光谱 Ŝ(λ)
     → 让 Ŝ(λ) 尽量接近 S(λ)。
 
-损失(loss)由 4 项组成，后 3 项都能单独开关（把对应权重设 0 即可）：
+损失(loss)由几项组成，除了 MSE 外都能单独开关（把对应权重设 0 即可）：
   loss = MSE(还原误差, 主目标)
+       + lambda_l1   · L1 逐点绝对误差  (直接逼每个波长点对齐)
+       + lambda_diff · 一阶差分 L1      (逼谱峰/谱形变化趋势对齐)
        + lambda_sam  · 光谱角      (轻微保住谱形，防止把峰抹平)
        + lambda_trans· 吞吐量惩罚  (别让滤光片整体太暗)
        + lambda_coh  · 通道去相关  (让 16 个滤光片形状尽量互补, 重建更好还原)
 
 约定：
-  - best checkpoint 只看 val_mse；test 集完全不碰，留给 04_eval_report.py 做最终汇报。
+  - best checkpoint 看 val_recon_loss；test 集完全不碰，留给 04_eval_report.py 做最终汇报。
   - 训练时用带噪声 + 随机入射角的测量；验证/评估用干净、0 度的测量。
 """
 
@@ -66,16 +68,16 @@ USER_SETTINGS = {
     # ---- 路径 ----
     # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "checkpoint_dir": "checkpoints",
-    "results_dir": "results",
-    "tensorboard_dir": "runs/ar_emt_live",
+    "checkpoint_dir": "checkpoints_l1diff_50",
+    "results_dir": "results_l1diff_50",
+    "tensorboard_dir": "runs/ar_emt_l1diff_50",
 
     # ---- 设备 / 复现 ----
     "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
     "seed": 2026,
 
     # ---- 训练规模 ----
-    "epochs": 150,         # 想快速试跑改成 2~3
+    "epochs": 50,          # 本次先跑 50 轮；想快速试跑改成 2~3
     "batch_size": 512,
     "eval_batch_size": 4096,
 
@@ -97,8 +99,10 @@ USER_SETTINGS = {
     # ---- loss 各项权重 ----
     "t_target": 0.75,       # 吞吐量下限目标：希望 16 条透过谱的平均透过率别低于它
     "lambda_trans": 0.05,   # 吞吐量惩罚权重
-    "lambda_coh": 0.02,     # 通道去相关权重(新增)：越大越逼 16 个滤光片形状互补
-    "lambda_sam": 0.05,     # 光谱角权重(新增)：轻微保住谱形；不想要就设 0
+    "lambda_coh": 0.005,    # 通道去相关权重：这次先降低，避免它压过重建精度
+    "lambda_sam": 0.05,     # 光谱角权重：轻微保住谱形；不想要就设 0
+    "lambda_l1": 0.10,      # 逐点 L1 权重：逼每个波长点更贴近
+    "lambda_diff": 0.20,    # 一阶差分 L1 权重：逼曲线起伏、谱峰边缘更贴近
 
     # ---- 优化器 ----
     # 物理结构参数和解码器分两组：结构参数学习率更小、不加 weight decay。
@@ -185,6 +189,33 @@ def make_alpha(batch_size: int, settings: dict, device: torch.device) -> torch.T
     raise ValueError(f"未知 angle_mode: {mode}")
 
 
+def diff_l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """一阶差分 L1：比较相邻波长点的变化量，重点约束谱形起伏。
+
+    普通 L1/MSE 关心每个点的高低；diff_L1 关心曲线怎么上升、怎么下降。
+    如果预测曲线被抹得太平，它通常会变大。
+    """
+
+    pred_diff = pred[:, 1:] - pred[:, :-1]
+    target_diff = target[:, 1:] - target[:, :-1]
+    return torch.mean(torch.abs(pred_diff - target_diff))
+
+
+def reconstruction_score(metrics: dict, settings: dict) -> float:
+    """验证集重建总分：只看重建质量，不把透过率/通道去相关放进来。
+
+    这个分数用来保存 best checkpoint。它和训练 loss 的重建部分一致，
+    但验证时不加噪声、不加随机角度，所以更适合判断模型真实重建能力。
+    """
+
+    return (
+        float(metrics["mse"])
+        + settings["lambda_l1"] * float(metrics["l1"])
+        + settings["lambda_diff"] * float(metrics["diff_l1"])
+        + settings["lambda_sam"] * float(metrics["sam"])
+    )
+
+
 def make_optimizer(model: AREMTModel, settings: dict) -> torch.optim.Optimizer:
     """创建 AdamW，分两组参数：
     1) 物理结构参数(rho/h_c/t_r/AR)：学习率小，不加 weight decay；
@@ -228,7 +259,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
 # ---- 训练日志：只记“训练/验证曲线 + 关键光学量”，结构参数另存一份 CSV ----
 TRAIN_LOG_HEADER = [
     "epoch", "lr_physics", "lr_decoder",
-    "train_loss", "train_mse", "val_mse", "val_psnr", "val_sam",
+    "train_loss", "train_mse", "train_l1", "train_diff_l1",
+    "val_recon_loss", "val_mse", "val_l1", "val_diff_l1", "val_psnr", "val_sam",
     "T0_mean", "T0_min", "tor_percent", "coherence0", "grad_norm",
 ]
 
@@ -275,7 +307,7 @@ def make_spectra_figure(model: AREMTModel) -> plt.Figure:
 
 
 def save_progress_plot(log_path: Path, out_path: Path) -> None:
-    """把 train_log.csv 画成 4 张训练曲线：MSE / 平均透过率 / 区分度 / 学习率。"""
+    """把 train_log.csv 画成 4 张训练曲线：误差 / 平均透过率 / 区分度 / 学习率。"""
 
     if not log_path.exists():
         return
@@ -287,6 +319,8 @@ def save_progress_plot(log_path: Path, out_path: Path) -> None:
     epoch = [int(r["epoch"]) for r in rows]
     train_mse = [float(r["train_mse"]) for r in rows]
     val_mse = [float(r["val_mse"]) for r in rows]
+    val_l1 = [float(r["val_l1"]) for r in rows]
+    val_diff_l1 = [float(r["val_diff_l1"]) for r in rows]
     t_mean = [float(r["T0_mean"]) for r in rows]
     tor = [float(r["tor_percent"]) for r in rows]
     coh = [float(r["coherence0"]) for r in rows]
@@ -295,6 +329,8 @@ def save_progress_plot(log_path: Path, out_path: Path) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(10, 7))
     axes[0, 0].plot(epoch, train_mse, marker="o", label="train MSE")
     axes[0, 0].plot(epoch, val_mse, marker="o", label="val MSE")
+    axes[0, 0].plot(epoch, val_l1, marker="s", label="val L1")
+    axes[0, 0].plot(epoch, val_diff_l1, marker="^", label="val diff_L1")
     axes[0, 0].set_yscale("log")
     axes[0, 0].set_xlabel("Epoch"); axes[0, 0].set_ylabel("MSE"); axes[0, 0].legend()
 
@@ -322,7 +358,12 @@ def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMT
 
     writer.add_scalar("loss/train_loss", float(row["train_loss"]), epoch)
     writer.add_scalar("loss/train_mse", float(row["train_mse"]), epoch)
+    writer.add_scalar("loss/train_l1", float(row["train_l1"]), epoch)
+    writer.add_scalar("loss/train_diff_l1", float(row["train_diff_l1"]), epoch)
+    writer.add_scalar("loss/val_recon_loss", float(row["val_recon_loss"]), epoch)
     writer.add_scalar("loss/val_mse", float(row["val_mse"]), epoch)
+    writer.add_scalar("loss/val_l1", float(row["val_l1"]), epoch)
+    writer.add_scalar("loss/val_diff_l1", float(row["val_diff_l1"]), epoch)
     writer.add_scalar("quality/val_psnr", float(row["val_psnr"]), epoch)
     writer.add_scalar("quality/val_sam", float(row["val_sam"]), epoch)
     writer.add_scalar("optics/T0_mean", float(row["T0_mean"]), epoch)
@@ -345,7 +386,7 @@ def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMT
 # =============================================================================
 
 
-def checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse) -> dict:
+def checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse, best_val_score) -> dict:
     return {
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -355,14 +396,16 @@ def checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch,
         "settings": settings,
         "epoch": epoch,
         "best_val_mse": best_val_mse,
+        "best_val_score": best_val_score,
+        "best_metric_name": "val_recon_loss",
     }
 
 
-def load_resume_if_needed(model, optimizer, scheduler, last_path: Path, settings: dict, device) -> tuple[int, float]:
+def load_resume_if_needed(model, optimizer, scheduler, last_path: Path, settings: dict, device) -> tuple[int, float, float]:
     """如果开了 resume 且存在 last checkpoint，就从上次断点继续训练。"""
 
     if not settings["resume"] or not last_path.exists():
-        return 1, math.inf
+        return 1, math.inf, math.inf
 
     ckpt = torch.load(last_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state"])
@@ -370,9 +413,10 @@ def load_resume_if_needed(model, optimizer, scheduler, last_path: Path, settings
     scheduler.load_state_dict(ckpt["scheduler_state"])
     start_epoch = int(ckpt["epoch"]) + 1
     best_val_mse = float(ckpt.get("best_val_mse", math.inf))
+    best_val_score = float(ckpt.get("best_val_score", best_val_mse))
     print(f"从 last checkpoint 继续训练: {last_path}")
-    print(f"  start_epoch={start_epoch}, best_val_mse={best_val_mse:.6e}")
-    return start_epoch, best_val_mse
+    print(f"  start_epoch={start_epoch}, best_val_mse={best_val_mse:.6e}, best_val_score={best_val_score:.6e}")
+    return start_epoch, best_val_mse, best_val_score
 
 
 def print_structure_brief(model: AREMTModel) -> None:
@@ -407,7 +451,7 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
     perm = torch.randperm(n_train)  # 每个 epoch 打乱一次样本顺序
 
     # 累加器，用来算这一轮的平均值
-    loss_sum = mse_sum = t_mean_sum = coh_sum = 0.0
+    loss_sum = mse_sum = l1_sum = diff_l1_sum = t_mean_sum = coh_sum = 0.0
     grad_norm_last = 0.0
     n_seen = 0
     epoch_start = time.time()
@@ -425,9 +469,17 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         meas = add_measurement_noise(meas, settings["noise_rel"], settings["noise_abs"])  # 训练时加噪
         pred = model.decoder(meas)                                    # 还原回 151 维 [B,151]
 
-        # ---------------- loss：主目标 + 三个约束 ----------------
+        # ---------------- loss：主目标 + 各种可选约束 ----------------
         loss_mse = mse_fn(pred, batch)                                # 主目标：还原误差
         loss = loss_mse
+
+        loss_l1 = torch.mean(torch.abs(pred - batch))                 # 逐波长点绝对误差
+        if settings["lambda_l1"] > 0:
+            loss = loss + settings["lambda_l1"] * loss_l1
+
+        loss_diff_l1 = diff_l1_loss(pred, batch)                      # 谱形起伏/斜率误差
+        if settings["lambda_diff"] > 0:
+            loss = loss + settings["lambda_diff"] * loss_diff_l1
 
         if settings["lambda_sam"] > 0:                               # 谱形约束(可选)
             loss = loss + settings["lambda_sam"] * sam_loss(pred, batch)
@@ -451,6 +503,8 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         bs = batch.shape[0]
         loss_sum += float(loss.detach().cpu()) * bs
         mse_sum += float(loss_mse.detach().cpu()) * bs
+        l1_sum += float(loss_l1.detach().cpu()) * bs
+        diff_l1_sum += float(loss_diff_l1.detach().cpu()) * bs
         t_mean_sum += float(t_mean.detach().cpu()) * bs
         coh_sum += float(coh.detach().cpu()) * bs
         grad_norm_last = float(grad_norm.detach().cpu())
@@ -462,10 +516,13 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
                 gb = (epoch - 1) * n_batches + batch_index
                 writer.add_scalar("batch/loss", float(loss.detach().cpu()), gb)
                 writer.add_scalar("batch/mse", float(loss_mse.detach().cpu()), gb)
+                writer.add_scalar("batch/l1", float(loss_l1.detach().cpu()), gb)
+                writer.add_scalar("batch/diff_l1", float(loss_diff_l1.detach().cpu()), gb)
             elapsed = time.time() - epoch_start
             pct = batch_index / n_batches * 100.0
             print(f"\repoch {epoch:04d}/{n_epochs} batch {batch_index:04d}/{n_batches:04d} ({pct:5.1f}%) | "
                   f"loss={float(loss.detach().cpu()):.4e} | mse={float(loss_mse.detach().cpu()):.4e} | "
+                  f"l1={float(loss_l1.detach().cpu()):.4e} | diff={float(loss_diff_l1.detach().cpu()):.4e} | "
                   f"Tmean={float(t_mean.detach().cpu()):.4f} | coh={float(coh.detach().cpu()):.4f} | "
                   f"grad={grad_norm_last:.3e} | {elapsed:6.1f}s", end="", flush=True)
     print()
@@ -473,6 +530,8 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
     return {
         "train_loss": loss_sum / n_seen,
         "train_mse": mse_sum / n_seen,
+        "train_l1": l1_sum / n_seen,
+        "train_diff_l1": diff_l1_sum / n_seen,
         "train_Tmean": t_mean_sum / n_seen,
         "train_coherence": coh_sum / n_seen,
         "grad_norm": grad_norm_last,
@@ -520,7 +579,7 @@ def main() -> None:
     spectra_plot_path = results_dir / "train_current_spectra_0deg.png"
     current_structure_path = results_dir / "ar_emt_current_structure.csv"
 
-    start_epoch, best_val_mse = load_resume_if_needed(model, optimizer, scheduler, last_path, settings, device)
+    start_epoch, best_val_mse, best_val_score = load_resume_if_needed(model, optimizer, scheduler, last_path, settings, device)
     if start_epoch == 1:
         init_train_log(train_log_path)
 
@@ -529,7 +588,8 @@ def main() -> None:
     print(f"device={device}")
     print(f"epochs={settings['epochs']}, batch_size={settings['batch_size']}, angle_mode={settings['angle_mode']}")
     print(f"noise: rel={settings['noise_rel']}, abs={settings['noise_abs']} | "
-          f"lambda: trans={settings['lambda_trans']}, coh={settings['lambda_coh']}, sam={settings['lambda_sam']}")
+          f"lambda: trans={settings['lambda_trans']}, coh={settings['lambda_coh']}, "
+          f"sam={settings['lambda_sam']}, l1={settings['lambda_l1']}, diff={settings['lambda_diff']}")
     print(f"训练日志: {train_log_path}")
     print(f"训练曲线: {progress_plot_path}")
     print(f"看 TensorBoard: 运行 06_start_tensorboard.py")
@@ -548,7 +608,8 @@ def main() -> None:
 
         # ---- 验证：干净、0 度 ----
         val_metrics = evaluate_fixed_angle(model, val_cpu, angle_deg=0.0, batch_size=settings["eval_batch_size"])
-        scheduler.step(val_metrics["mse"])
+        val_score = reconstruction_score(val_metrics, settings)
+        scheduler.step(val_score)
 
         # ---- 记录当前 0 度滤光片的几个观察量 ----
         with torch.no_grad():
@@ -564,7 +625,12 @@ def main() -> None:
             "lr_decoder": optimizer.param_groups[1]["lr"],
             "train_loss": train_info["train_loss"],
             "train_mse": train_info["train_mse"],
+            "train_l1": train_info["train_l1"],
+            "train_diff_l1": train_info["train_diff_l1"],
+            "val_recon_loss": val_score,
             "val_mse": val_metrics["mse"],
+            "val_l1": val_metrics["l1"],
+            "val_diff_l1": val_metrics["diff_l1"],
             "val_psnr": val_metrics["psnr"],
             "val_sam": val_metrics["sam"],
             "T0_mean": t_mean_eval,
@@ -585,18 +651,21 @@ def main() -> None:
             write_tensorboard(writer, epoch, row, model)
 
         # 每个评估轮都存一份 last checkpoint（断点续训用）
-        torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse), last_path)
+        torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse, best_val_score), last_path)
 
         print(f"epoch {epoch:04d}/{settings['epochs']} | train_mse={row['train_mse']:.6e} | "
-              f"val_mse={row['val_mse']:.6e} | psnr={row['val_psnr']:.2f} | sam={row['val_sam']:.4f} | "
+              f"val_score={row['val_recon_loss']:.6e} | val_mse={row['val_mse']:.6e} | "
+              f"val_l1={row['val_l1']:.6e} | diff={row['val_diff_l1']:.6e} | "
+              f"psnr={row['val_psnr']:.2f} | sam={row['val_sam']:.4f} | "
               f"T0_mean={row['T0_mean']:.4f} T0_min={row['T0_min']:.4f} | "
               f"tor={row['tor_percent']:.3f}% coh={row['coherence0']:.4f} | grad={row['grad_norm']:.3e}")
         print_structure_brief(model)
 
-        # 只有 val_mse 创新低时，才更新 best checkpoint
-        if val_metrics["mse"] < best_val_mse:
+        # 只有验证集重建总分创新低时，才更新 best checkpoint
+        if val_score < best_val_score:
             best_val_mse = val_metrics["mse"]
-            torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse), best_path)
+            best_val_score = val_score
+            torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse, best_val_score), best_path)
             save_structure_csv(model, results_dir / "ar_emt_best_structure.csv")
             print(f"  ✔ 新的 best，已保存: {best_path}")
         print()
@@ -605,7 +674,7 @@ def main() -> None:
         writer.close()
 
     print(f"训练完成。last checkpoint: {last_path}")
-    print(f"最佳 val_mse: {best_val_mse:.6e}")
+    print(f"最佳 val_recon_loss: {best_val_score:.6e}, 对应 val_mse: {best_val_mse:.6e}")
     print(f"总耗时: {(time.time() - total_start) / 60.0:.2f} min")
 
 

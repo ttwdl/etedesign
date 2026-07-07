@@ -44,13 +44,13 @@ from ar_emt_common import AREMTModel, GeometryConfig, metric_mse_psnr_sam
 # =============================================================================
 USER_SETTINGS = {
     # 用 best checkpoint 推理。训练没结束时也可临时改成 checkpoints/ar_emt_last.pt。
-    "checkpoint": "checkpoints/ar_emt_best.pt",
+    "checkpoint": "checkpoints_l1diff_50/ar_emt_best.pt",
 
     # 默认拿一个 CAVE 场景做例子；可改成别的 CAVE 目录或 npy/mat 文件。
     "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms\balloons_ms",
 
     # 推理结果单独放这里，别和训练结果混。
-    "output_dir": "results_infer",
+    "output_dir": "results_infer_l1diff_50",
 
     "device": "cuda",
     "angle_deg": 0.0,
@@ -192,7 +192,8 @@ def load_model(checkpoint_path: Path, device: torch.device) -> AREMTModel:
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     print(f"读取 checkpoint: {checkpoint_path}")
-    print(f"  epoch={ckpt.get('epoch')}, best_val_mse={ckpt.get('best_val_mse')}")
+    print(f"  epoch={ckpt.get('epoch')}, best_val_mse={ckpt.get('best_val_mse')}, "
+          f"best_val_score={ckpt.get('best_val_score')}")
     return model
 
 
@@ -310,7 +311,8 @@ def main() -> None:
     summary = {
         "source": source_desc, "checkpoint": settings["checkpoint"], "angle_deg": settings["angle_deg"],
         "n_spectra": spectra_flat.shape[0],
-        "mse": metrics["mse"], "psnr": metrics["psnr"], "sam": metrics["sam"],
+        "mse": metrics["mse"], "l1": metrics["l1"], "diff_l1": metrics["diff_l1"],
+        "psnr": metrics["psnr"], "sam": metrics["sam"],
         "input_min": float(spectra_flat.min()), "input_max": float(spectra_flat.max()), "input_mean": float(spectra_flat.mean()),
         "pred_min": float(pred_flat.min()), "pred_max": float(pred_flat.max()), "pred_mean": float(pred_flat.mean()),
     }
@@ -335,7 +337,8 @@ def main() -> None:
 
     print()
     print("推理完成")
-    print(f"  mse={metrics['mse']:.6e}, psnr={metrics['psnr']:.2f}, sam={metrics['sam']:.4f}")
+    print(f"  mse={metrics['mse']:.6e}, l1={metrics['l1']:.6e}, "
+          f"diff={metrics['diff_l1']:.6e}, psnr={metrics['psnr']:.2f}, sam={metrics['sam']:.4f}")
     print(f"  结果已保存到: {output_dir}")
     print("  重点看:")
     print(f"    {output_dir / 'selected_pixel_spectra.png'}")

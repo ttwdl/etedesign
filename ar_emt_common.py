@@ -721,21 +721,34 @@ class AREMTModel(nn.Module):
 
 
 def metric_mse_psnr_sam(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
-    """一次算三个常用指标：MSE、PSNR、SAM（都只用于看结果，不进 loss）。
+    """一次算几个常用指标（都只用于看结果，不进 loss）。
 
     - MSE：逐点均方误差，越小越好。
+    - L1：逐点平均绝对误差，越小越好；它很直观，就是平均每个波长点差多少。
+    - diff_L1：一阶差分误差，比较相邻波长点的变化趋势，越小表示谱峰/谱形斜率越像。
     - PSNR：峰值信噪比(dB)，越大越好。这里按峰值=1 计算（数据已缩放到 0~1）。
     - SAM：光谱角(弧度)，衡量谱形差异，越小越好。
     """
 
     with torch.no_grad():
-        mse = torch.mean((pred - target).square())
+        err = pred - target
+        mse = torch.mean(err.square())
+        l1 = torch.mean(torch.abs(err))
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        diff_l1 = torch.mean(torch.abs(pred_diff - target_diff))
         psnr = 10.0 * torch.log10(1.0 / (mse + 1e-12))
         dot = torch.sum(pred * target, dim=1)
         denom = torch.linalg.norm(pred, dim=1) * torch.linalg.norm(target, dim=1) + 1e-12
         cos_val = torch.clamp(dot / denom, -1.0, 1.0)
         sam = torch.mean(torch.arccos(cos_val))
-    return {"mse": float(mse.cpu()), "psnr": float(psnr.cpu()), "sam": float(sam.cpu())}
+    return {
+        "mse": float(mse.cpu()),
+        "l1": float(l1.cpu()),
+        "diff_l1": float(diff_l1.cpu()),
+        "psnr": float(psnr.cpu()),
+        "sam": float(sam.cpu()),
+    }
 
 
 def evaluate_fixed_angle(

@@ -49,9 +49,9 @@ from ar_emt_common import (
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints/ar_emt_best.pt",
+    "checkpoint": "checkpoints_l1diff_50/ar_emt_best.pt",
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "output_dir": "results",
+    "output_dir": "results_l1diff_50",
     "device": "cuda",
 
     "test_size": 0,   # 0 表示用 test_spectra.npy 的全部数据
@@ -111,7 +111,8 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[AREMTModel,
 
     print(geometry_report(config))
     print(f"读取 checkpoint: {checkpoint_path}")
-    print(f"  epoch={ckpt.get('epoch')}, best_val_mse={ckpt.get('best_val_mse')}")
+    print(f"  epoch={ckpt.get('epoch')}, best_val_mse={ckpt.get('best_val_mse')}, "
+          f"best_val_score={ckpt.get('best_val_score')}")
     print()
     return model, ckpt
 
@@ -259,13 +260,15 @@ def main() -> None:
             t = model.transmission(torch.tensor([angle], device=device))[0]
             row = {
                 "angle_deg": angle,
-                "mse": metrics["mse"], "psnr": metrics["psnr"], "sam": metrics["sam"],
+                "mse": metrics["mse"], "l1": metrics["l1"], "diff_l1": metrics["diff_l1"],
+                "psnr": metrics["psnr"], "sam": metrics["sam"],
                 "T_mean": float(t.mean().cpu()), "T_min": float(t.min().cpu()),
                 "T_peak_median": float(torch.median(t.max(dim=1).values).cpu()),
                 "tor_percent": tor_percent(t),
             }
         angle_rows.append(row)
-        print(f"angle={angle:4.1f} deg | mse={row['mse']:.6e} | psnr={row['psnr']:.2f} | "
+        print(f"angle={angle:4.1f} deg | mse={row['mse']:.6e} | l1={row['l1']:.6e} | "
+              f"diff={row['diff_l1']:.6e} | psnr={row['psnr']:.2f} | "
               f"sam={row['sam']:.4f} | T_mean={row['T_mean']:.4f} | tor={row['tor_percent']:.3f}%")
 
     save_csv(angle_rows, output_dir / "eval_angles.csv")
