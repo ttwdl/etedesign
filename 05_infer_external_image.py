@@ -58,7 +58,17 @@ USER_SETTINGS = {
 
     # 画几条像素光谱做检查，格式 (y, x)。
     # 若输入是 [N,151] 这种没有图像宽高的数据，就按样本编号取前几个。
-    "plot_pixels": [(80, 80), (180, 260), (320, 320)],
+    "plot_pixels": [
+        (80, 80),    # 暗背景/低强度点
+        (145, 80),   # 左侧亮环附近
+        (180, 260),  # 中间气球表面
+        (220, 250),  # 中间气球高误差区域附近
+        (260, 420),  # 右侧气球表面
+        (320, 320),  # 原来常看的代表点
+        (355, 300),  # 下方亮点附近
+        (420, 120),  # 左下气球暗部
+        (430, 430),  # 右下暗背景/边缘
+    ],
 }
 
 
@@ -234,23 +244,45 @@ def save_summary_csv(summary: dict, path: Path) -> None:
 def plot_selected_spectra(gt_flat, pred_flat, image_shape, plot_pixels, out_path: Path) -> None:
     """画几个像素位置的真实光谱(实线)和重建光谱(虚线)对比。"""
 
-    plt.figure(figsize=(9, 5))
     if image_shape is None:
-        for idx in range(min(3, gt_flat.shape[0])):
-            plt.plot(WL_151, gt_flat[idx], lw=1.8, label=f"gt sample {idx}")
-            plt.plot(WL_151, pred_flat[idx], lw=1.2, ls="--", label=f"pred sample {idx}")
+        sample_indices = list(range(min(len(plot_pixels), gt_flat.shape[0])))
+        titles = [f"sample {idx}" for idx in sample_indices]
     else:
         h, w = image_shape
+        sample_indices = []
+        titles = []
         for y, x in plot_pixels:
             yy = int(np.clip(y, 0, h - 1))
             xx = int(np.clip(x, 0, w - 1))
-            idx = yy * w + xx
-            plt.plot(WL_151, gt_flat[idx], lw=1.8, label=f"gt ({yy},{xx})")
-            plt.plot(WL_151, pred_flat[idx], lw=1.2, ls="--", label=f"pred ({yy},{xx})")
+            sample_indices.append(yy * w + xx)
+            titles.append(f"({yy},{xx})")
 
-    plt.xlabel("Wavelength (nm)"); plt.ylabel("Intensity")
-    plt.title("Selected pixel spectra"); plt.legend(fontsize=8)
-    plt.tight_layout(); plt.savefig(out_path, dpi=180); plt.close()
+    n = len(sample_indices)
+    n_cols = 3 if n > 4 else max(1, n)
+    n_rows = int(np.ceil(n / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.0 * n_cols, 2.9 * n_rows), squeeze=False)
+    axes_flat = axes.ravel()
+
+    for ax, idx, title in zip(axes_flat, sample_indices, titles):
+        gt = gt_flat[idx]
+        pred = pred_flat[idx]
+        mse = float(np.mean((pred - gt) ** 2))
+        ax.plot(WL_151, gt, lw=1.8, label="gt")
+        ax.plot(WL_151, pred, lw=1.3, ls="--", label="pred")
+        ax.set_title(f"{title}, MSE={mse:.2e}", fontsize=10)
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Intensity")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8)
+
+    # 如果点数不是 3 的倍数，多出来的空子图关掉。
+    for ax in axes_flat[n:]:
+        ax.axis("off")
+
+    fig.suptitle("Selected pixel spectra", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
 
 
 def plot_error_map(gt_flat, pred_flat, image_shape, out_path: Path) -> None:
