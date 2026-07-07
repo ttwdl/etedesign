@@ -38,7 +38,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "output_dir": "results_longtor_50",
+    "output_dir": "results_recon_t06_tor25_50",
     "output_stem": "network_architecture_ppt",
 }
 

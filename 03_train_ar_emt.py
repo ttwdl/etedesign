@@ -71,9 +71,9 @@ USER_SETTINGS = {
     # ---- 路径 ----
     # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "checkpoint_dir": "checkpoints_longtor_50",
-    "results_dir": "results_longtor_50",
-    "tensorboard_dir": "runs/ar_emt_longtor_50",
+    "checkpoint_dir": "checkpoints_recon_t06_tor25_50",
+    "results_dir": "results_recon_t06_tor25_50",
+    "tensorboard_dir": "runs/ar_emt_recon_t06_tor25_50",
 
     # ---- 设备 / 复现 ----
     "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
@@ -99,8 +99,8 @@ USER_SETTINGS = {
     "hidden_dims": (512, 256),
     "h_c_range": (250.0, 1500.0),
     "t_r_range": (0.0, 1500.0),
-    "core_total_nm": 1000.0,
-    "core_total_range": (800.0, 1800.0),
+    "core_total_nm": 1200.0,
+    "core_total_range": (1000.0, 2000.0),
     "aspect_ratio_max": 10.0,
 
     # ---- 测量噪声（重要）----
@@ -111,13 +111,13 @@ USER_SETTINGS = {
     "noise_abs": 0.0,
 
     # ---- loss 各项权重 ----
-    "t_target": 0.75,       # 吞吐量下限目标：希望 16 条透过谱的平均透过率别低于它
-    "lambda_trans": 0.05,   # 吞吐量惩罚权重
+    "t_target": 0.60,       # 吞吐量下限目标：这版优先重建精度，允许平均透过率降到约 0.6
+    "lambda_trans": 0.03,   # 吞吐量惩罚权重：比旧版更轻，别让它压过重建误差
     "lambda_coh": 0.005,    # 通道去相关权重：这次先降低，避免它压过重建精度
     "lambda_sam": 0.05,     # 光谱角权重：轻微保住谱形；不想要就设 0
     "lambda_l1": 0.10,      # 逐点 L1 权重：逼每个波长点更贴近
     "lambda_diff": 0.20,    # 一阶差分 L1 权重：逼曲线起伏、谱峰边缘更贴近
-    "tor_target_percent": 2.0,  # 希望最相似的两个滤光片也至少相差约 2%
+    "tor_target_percent": 2.5,  # 希望最相似的两个滤光片也至少相差约 2.5%
     "lambda_tor": 0.01,         # tor 下限约束权重；先温和开，太大会牺牲重建精度
 
     # ---- 优化器 ----

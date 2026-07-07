@@ -3,7 +3,7 @@
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 04_eval_report.py
 
-它会读取 checkpoints_longtor_50/ar_emt_best.pt 和 test_spectra.npy，然后输出：
+它会读取 checkpoints_recon_t06_tor25_50/ar_emt_best.pt 和 test_spectra.npy，然后输出：
   - 不同入射角下的重建精度表（eval_angles.csv）；
   - 结构参数表（eval_structure.csv）；
   - 制造误差 Monte Carlo（eval_fabrication_mc.csv）；
@@ -50,9 +50,9 @@ from ar_emt_common import (
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints_longtor_50/ar_emt_best.pt",
+    "checkpoint": "checkpoints_recon_t06_tor25_50/ar_emt_best.pt",
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "output_dir": "results_longtor_50",
+    "output_dir": "results_recon_t06_tor25_50",
     "device": "cuda",
 
     "test_size": 0,   # 0 表示用 test_spectra.npy 的全部数据
