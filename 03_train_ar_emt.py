@@ -68,9 +68,9 @@ USER_SETTINGS = {
     # ---- 路径 ----
     # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "checkpoint_dir": "checkpoints_flat_hc_50",
-    "results_dir": "results_flat_hc_50",
-    "tensorboard_dir": "runs/ar_emt_flat_hc_50",
+    "checkpoint_dir": "checkpoints_hctotal_ar10_50",
+    "results_dir": "results_hctotal_ar10_50",
+    "tensorboard_dir": "runs/ar_emt_hctotal_ar10_50",
 
     # ---- 设备 / 复现 ----
     "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
@@ -218,11 +218,11 @@ def reconstruction_score(metrics: dict, settings: dict) -> float:
 
 def make_optimizer(model: AREMTModel, settings: dict) -> torch.optim.Optimizer:
     """创建 AdamW，分两组参数：
-    1) 物理结构参数(rho/每通道h_c/AR)：学习率小，不加 weight decay；
+    1) 物理结构参数(rho/全局H_total/每通道h_c/AR)：学习率小，不加 weight decay；
     2) 解码器参数：学习率大，加一点 weight decay 抑制过拟合。
     """
 
-    physics_params = [model.rho, model.raw_h_c, model.raw_ar]
+    physics_params = [model.rho, model.raw_core_total, model.raw_h_c, model.raw_ar]
     return torch.optim.AdamW(
         [
             {"params": physics_params, "lr": settings["physics_lr"], "weight_decay": 0.0, "name": "physics"},
@@ -428,12 +428,16 @@ def print_structure_brief(model: AREMTModel) -> None:
     h_c = params["h_c_nm"].detach().cpu()
     t_r = params["t_r_nm"].detach().cpu()
     core_total = float(params["core_total_nm"].detach().cpu())
+    aspect = params["aspect_ratio"].detach().cpu()
+    aspect_max = float(params["aspect_ratio_max"].detach().cpu())
     period = model.config.period_nm
     emt = emt_condition(model.config, ratio.max())
     status = "OK" if emt["ok"] else "FAIL"
     print(f"  h_c=[{float(h_c.min()):.2f}, {float(h_c.max()):.2f}] nm, "
           f"t_r=[{float(t_r.min()):.2f}, {float(t_r.max()):.2f}] nm, "
-          f"h_c+t_r={core_total:.2f} nm")
+          f"H_total={core_total:.2f} nm")
+    print(f"  aspect=h_c/D=[{float(aspect.min()):.2f}, {float(aspect.max()):.2f}], "
+          f"limit={aspect_max:.1f}")
     print(f"  AR=[{ar[0]:.2f}, {ar[1]:.2f}, {ar[2]:.2f}, {ar[3]:.2f}] nm")
     print(f"  D/P=[{float(ratio.min()):.4f}, {float(ratio.max()):.4f}], "
           f"D=[{float(ratio.min()) * period:.2f}, {float(ratio.max()) * period:.2f}] nm, "

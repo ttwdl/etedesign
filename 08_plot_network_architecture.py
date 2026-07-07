@@ -38,7 +38,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "output_dir": "results_flat_hc_50",
+    "output_dir": "results_hctotal_ar10_50",
     "output_stem": "network_architecture_ppt",
 }
 
@@ -135,7 +135,7 @@ def main() -> None:
             "S(λ)\nshape: [B,151]\nλ = 400-700 nm\n保留相对明暗\n不做逐条归一化", "#d6eaf8")
 
     add_box(ax, (2.45, 3.45), (2.45, 1.55), "可训练光学编码器",
-            "16 个滤光片\n每通道改变 D/P 和 h_c\nρ → r=D/P → D → f → n_eff\n约束: h_c + t_r = 常数", "#fdebd0")
+            "16 个滤光片\n每通道改变 D/P 和 h_c\n全局训练 H_total\n约束: h_c/D ≤ 10, t_r=H_total-h_c", "#fdebd0")
 
     add_box(ax, (5.35, 3.45), (1.25, 1.55), "可微 TMM",
             "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [16,151]", "#e8daef", title_size=12, body_size=9)
@@ -157,7 +157,7 @@ def main() -> None:
             "     + λ_trans·吞吐量惩罚\n     + λ_coh·通道去相关", "#f9e79f", body_size=9.5)
 
     add_box(ax, (0.55, 0.70), (2.55, 1.45), "会被更新的参数",
-            "编码器: ρ[16], h_c[16], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)
+            "编码器: ρ[16], H_total, h_c[16], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)
 
     add_box(ax, (7.85, 0.55), (2.85, 0.90), "训练/验证/测试",
             "train 更新参数, val 选 best。\ntest 只在 04 最终评估用。\n数据按“场景”划分, 互不串味。", "#ebedef", title_size=12, body_size=9.0)

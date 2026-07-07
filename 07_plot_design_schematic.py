@@ -4,7 +4,7 @@
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 07_plot_design_schematic.py
 
 输出:
-  results_flat_hc_50/design_schematic.png
+  results_hctotal_ar10_50/design_schematic.png
 
 这张图分三块：左=纵向层结构，右上=4x4 滤光片 D/h_c 分布，下=0 度透过谱。
 注意：图不是按真实厚度比例画的（EMT 腔几百 nm，AR 层几十 nm，按真实比例会看不清），
@@ -36,8 +36,8 @@ from ar_emt_common import AREMTModel, GeometryConfig, structure_rows
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints_flat_hc_50/ar_emt_best.pt",
-    "output_png": "results_flat_hc_50/design_schematic.png",
+    "checkpoint": "checkpoints_hctotal_ar10_50/ar_emt_best.pt",
+    "output_png": "results_hctotal_ar10_50/design_schematic.png",
 }
 
 
@@ -72,6 +72,8 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
     h_c_all = params["h_c_nm"].detach().cpu().numpy()
     t_r_all = params["t_r_nm"].detach().cpu().numpy()
     core_total = float(params["core_total_nm"].detach().cpu())
+    aspect = params["aspect_ratio"].detach().cpu().numpy()
+    aspect_max = float(params["aspect_ratio_max"].detach().cpu())
     mid_ch = len(h_c_all) // 2
     h_c = float(h_c_all[mid_ch])
     t_r = float(t_r_all[mid_ch])
@@ -120,9 +122,10 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
     ax.text(
         x0,
         y + 0.02,
-        f"shown: ch{mid_ch}; all channels keep h_c + t_r = {core_total:.1f} nm\n"
+        f"shown: ch{mid_ch}; trained global H_total = h_c + t_r = {core_total:.1f} nm\n"
         f"h_c range {h_c_all.min():.1f}-{h_c_all.max():.1f} nm, "
-        f"t_r range {t_r_all.min():.1f}-{t_r_all.max():.1f} nm",
+        f"t_r range {t_r_all.min():.1f}-{t_r_all.max():.1f} nm\n"
+        f"aspect h_c/D range {aspect.min():.2f}-{aspect.max():.2f}, limit {aspect_max:.1f}",
         ha="left",
         va="bottom",
         fontsize=8,
@@ -147,7 +150,7 @@ def draw_channel_layout(ax, model: AREMTModel) -> None:
     ax.set_aspect("equal")
     ax.set_xlim(0, 4); ax.set_ylim(0, 4)
     ax.invert_yaxis()
-    ax.set_title("4x4 filters: D and h_c change, h_c+t_r fixed")
+    ax.set_title("4x4 filters: D and h_c change, shared H_total")
 
     for i in range(4):
         for j in range(4):

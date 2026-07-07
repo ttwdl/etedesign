@@ -610,9 +610,11 @@ class AREMTModel(nn.Module):
         config: GeometryConfig,
         n_channels: int = 16,
         hidden_dims: tuple[int, ...] = (512, 256),  # 解码器隐藏层：可自由加深/加宽（改了要重新训练）
-        h_c_range: tuple[float, float] = (350.0, 650.0),
-        t_r_range: tuple[float, float] = (0.0, 300.0),
+        h_c_range: tuple[float, float] = (250.0, 1500.0),
+        t_r_range: tuple[float, float] = (0.0, 1500.0),
         core_total_nm: float = 650.0,
+        core_total_range: tuple[float, float] = (450.0, 1800.0),
+        aspect_ratio_max: float = 10.0,
         ar_range: tuple[float, float] = (5.0, 160.0),
     ) -> None:
         super().__init__()
@@ -621,7 +623,8 @@ class AREMTModel(nn.Module):
         self.hidden_dims = hidden_dims
         self.h_c_range = h_c_range
         self.t_r_range = t_r_range
-        self.core_total_nm = float(core_total_nm)
+        self.core_total_range = core_total_range
+        self.aspect_ratio_max = float(aspect_ratio_max)
         self.ar_range = ar_range
 
         limits = geometry_limits(config)
@@ -640,23 +643,14 @@ class AREMTModel(nn.Module):
         )
         self.rho = nn.Parameter(raw_from_bounded(ratio_init, self.r_min, self.r_max))
 
+        # H_total 是全局可训练总腔长。每个通道共享同一个 H_total，所以表面仍然平整。
+        self.raw_core_total = nn.Parameter(raw_from_bounded(core_total_nm, *core_total_range))
+
         # 每个通道有自己的 EMT 腔厚 h_c_l；残余 SU-8 厚度不单独训练，
-        # 而是由 t_r_l = core_total_nm - h_c_l 自动算出来。
-        # 这样 16 个通道的内部比例不同，光谱调制更强；但 h_c_l + t_r_l 恒定，整体仍然平整。
-        h_c_min = max(float(h_c_range[0]), self.core_total_nm - float(t_r_range[1]))
-        h_c_max = min(float(h_c_range[1]), self.core_total_nm - float(t_r_range[0]))
-        if h_c_min >= h_c_max:
-            raise ValueError(
-                "h_c_range / t_r_range / core_total_nm 不兼容："
-                f"得到的 h_c 可行区间为 [{h_c_min}, {h_c_max}]。"
-            )
-        self.h_c_effective_range = (h_c_min, h_c_max)
-        h_c_init = torch.linspace(
-            h_c_min + 0.05 * (h_c_max - h_c_min),
-            h_c_max - 0.05 * (h_c_max - h_c_min),
-            n_channels,
-        )
-        self.raw_h_c = nn.Parameter(raw_from_bounded(h_c_init, h_c_min, h_c_max))      # 每通道 EMT 腔厚
+        # 而是由 t_r_l = H_total - h_c_l 自动算出来。
+        # h_c_l 的上限还会受深宽比约束：h_c_l / D_l <= aspect_ratio_max。
+        h_frac_init = torch.linspace(0.10, 0.90, n_channels)
+        self.raw_h_c = nn.Parameter(torch.logit(h_frac_init))                         # 每通道 EMT 腔厚比例
         self.raw_ar = nn.Parameter(raw_from_bounded(quarter_wave_ar_thickness(), *ar_range))  # 4 个 AR 层厚
 
         # ---- 解码器 MLP：16 → ...隐藏层... → 151 ----
@@ -672,15 +666,55 @@ class AREMTModel(nn.Module):
         decoder_layers.append(nn.Softplus())
         self.decoder = nn.Sequential(*decoder_layers)
 
+    def h_c_bounds(self, ratio: torch.Tensor, core_total: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """按当前 D/P 和 H_total 算每个通道允许的 h_c 下限/上限。
+
+        约束来源：
+        1. h_c_range：工艺上允许的 TiO2 柱高度范围；
+        2. t_r_range：因为 t_r = H_total - h_c，所以 t_r 也要在范围内；
+        3. 深宽比：h_c / D <= aspect_ratio_max，默认最大深宽比 10。
+        """
+
+        device = ratio.device
+        dtype = ratio.dtype
+        core = core_total.to(device=device, dtype=dtype)
+        d_nm = ratio * float(self.config.period_nm)
+
+        low = torch.as_tensor(self.h_c_range[0], device=device, dtype=dtype)
+        low = torch.maximum(low, core - float(self.t_r_range[1]))
+        low = low.expand_as(ratio)
+
+        high = torch.as_tensor(self.h_c_range[1], device=device, dtype=dtype)
+        high = torch.minimum(high, core - float(self.t_r_range[0]))
+        high = torch.minimum(high.expand_as(ratio), self.aspect_ratio_max * d_nm)
+
+        if torch.any(high <= low):
+            min_margin = float((high - low).detach().min().cpu())
+            raise ValueError(
+                "h_c 可行区间为空：请放宽 H_total/h_c/t_r/深宽比范围。"
+                f" 当前最小 high-low = {min_margin:.3f} nm"
+            )
+        return low, high
+
     def physical_parameters(self) -> dict[str, torch.Tensor]:
         """把 raw 参数换算成有物理意义的量（D/P、各层厚度，单位 nm）。"""
 
         ratio = bounded_value(self.rho, self.r_min, self.r_max)
-        h_c = bounded_value(self.raw_h_c, *self.h_c_effective_range)
-        t_r = self.core_total_nm - h_c
+        core_total = bounded_value(self.raw_core_total, *self.core_total_range)
+        h_low, h_high = self.h_c_bounds(ratio, core_total)
+        h_c = h_low + (h_high - h_low) * torch.sigmoid(self.raw_h_c)
+        t_r = core_total - h_c
+        aspect_ratio = h_c / (ratio * float(self.config.period_nm))
         ar = bounded_value(self.raw_ar, *self.ar_range)
-        core_total = torch.as_tensor(self.core_total_nm, dtype=h_c.dtype, device=h_c.device)
-        return {"ratio": ratio, "h_c_nm": h_c, "t_r_nm": t_r, "core_total_nm": core_total, "ar_nm": ar}
+        return {
+            "ratio": ratio,
+            "h_c_nm": h_c,
+            "t_r_nm": t_r,
+            "core_total_nm": core_total,
+            "aspect_ratio": aspect_ratio,
+            "aspect_ratio_max": torch.as_tensor(self.aspect_ratio_max, dtype=h_c.dtype, device=h_c.device),
+            "ar_nm": ar,
+        }
 
     def transmission(
         self,
@@ -826,6 +860,8 @@ def structure_rows(model: AREMTModel) -> list[dict[str, float]]:
     h_c = params["h_c_nm"].detach().cpu()
     t_r = params["t_r_nm"].detach().cpu()
     core_total = float(params["core_total_nm"].detach().cpu())
+    aspect_ratio = params["aspect_ratio"].detach().cpu()
+    aspect_ratio_max = float(params["aspect_ratio_max"].detach().cpu())
     period = model.config.period_nm
     wl = model.wl_nm.detach().cpu()
     neff = emt_neff_from_ratio(ratio, wl).real.detach().cpu()
@@ -844,6 +880,8 @@ def structure_rows(model: AREMTModel) -> list[dict[str, float]]:
                 "h_c_nm": float(h_c[idx]),
                 "t_r_nm": float(t_r[idx]),
                 "core_total_nm": core_total,
+                "aspect_ratio_h_over_D": float(aspect_ratio[idx]),
+                "aspect_ratio_max": aspect_ratio_max,
                 "neff_min": float(neff[idx].min()),
                 "neff_max": float(neff[idx].max()),
             }
