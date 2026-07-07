@@ -4,7 +4,7 @@
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 07_plot_design_schematic.py
 
 输出:
-  results_25ch_t06_tor20_50/design_schematic.png
+  results_36ch_t06_tor15_50/design_schematic.png
 
 这张图分三块：左=纵向层结构，右上=滤光片 D/h_c 分布，下=0 度透过谱。
 注意：图不是按真实厚度比例画的（EMT 腔几百 nm，AR 层几十 nm，按真实比例会看不清），
@@ -36,8 +36,8 @@ from ar_emt_common import AREMTModel, GeometryConfig, model_kwargs_from_settings
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints_25ch_t06_tor20_50/ar_emt_best.pt",
-    "output_png": "results_25ch_t06_tor20_50/design_schematic.png",
+    "checkpoint": "checkpoints_36ch_t06_tor15_50/ar_emt_best.pt",
+    "output_png": "results_36ch_t06_tor15_50/design_schematic.png",
 }
 
 
@@ -140,7 +140,7 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
 def draw_channel_layout(ax, model: AREMTModel) -> None:
     """画所有滤光片的柱径和 EMT 腔厚分布。
 
-    16 通道会自动画成 4x4，25 通道会自动画成 5x5。
+    16 通道会自动画成 4x4，25 通道会自动画成 5x5，36 通道会自动画成 6x6。
     """
 
     rows = structure_rows(model)
