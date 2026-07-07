@@ -293,22 +293,38 @@ def plot_selected_spectra(
     plot_pixels: list[tuple[int, int]],
     out_path: Path,
 ) -> None:
-    """画几个像素位置的真实光谱和重建光谱。"""
+    """画几个像素位置的真实光谱和重建光谱。
+
+    同一个像素使用同一种颜色：
+    - 实线是真实光谱；
+    - 虚线是重建光谱。
+
+    这样比自动换颜色更容易判断某个像素到底准不准。
+    """
 
     plt.figure(figsize=(9, 5))
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     if image_shape is None:
         sample_ids = list(range(min(3, gt_flat.shape[0])))
-        for idx in sample_ids:
-            plt.plot(WL_151, gt_flat[idx], lw=1.8, label=f"gt sample {idx}")
-            plt.plot(WL_151, pred_flat[idx], lw=1.2, ls="--", label=f"pred sample {idx}")
+        for k, idx in enumerate(sample_ids):
+            color = colors[k % len(colors)]
+            mse = float(np.mean((pred_flat[idx] - gt_flat[idx]) ** 2))
+            sam = spectral_angle(gt_flat[idx], pred_flat[idx])
+            label = f"sample {idx}, MSE={mse:.2e}, SAM={sam:.3f}"
+            plt.plot(WL_151, gt_flat[idx], lw=1.8, color=color, label=f"gt {label}")
+            plt.plot(WL_151, pred_flat[idx], lw=1.3, ls="--", color=color, label=f"pred {label}")
     else:
         h, w = image_shape
-        for y, x in plot_pixels:
+        for k, (y, x) in enumerate(plot_pixels):
             yy = int(np.clip(y, 0, h - 1))
             xx = int(np.clip(x, 0, w - 1))
             idx = yy * w + xx
-            plt.plot(WL_151, gt_flat[idx], lw=1.8, label=f"gt ({yy},{xx})")
-            plt.plot(WL_151, pred_flat[idx], lw=1.2, ls="--", label=f"pred ({yy},{xx})")
+            color = colors[k % len(colors)]
+            mse = float(np.mean((pred_flat[idx] - gt_flat[idx]) ** 2))
+            sam = spectral_angle(gt_flat[idx], pred_flat[idx])
+            label = f"({yy},{xx}), MSE={mse:.2e}, SAM={sam:.3f}"
+            plt.plot(WL_151, gt_flat[idx], lw=1.8, color=color, label=f"gt {label}")
+            plt.plot(WL_151, pred_flat[idx], lw=1.3, ls="--", color=color, label=f"pred {label}")
 
     plt.xlabel("Wavelength (nm)")
     plt.ylabel("Intensity")
@@ -317,6 +333,14 @@ def plot_selected_spectra(
     plt.tight_layout()
     plt.savefig(out_path, dpi=180)
     plt.close()
+
+
+def spectral_angle(gt: np.ndarray, pred: np.ndarray) -> float:
+    """计算单条光谱的 SAM，单位是弧度。"""
+
+    denom = np.linalg.norm(gt) * np.linalg.norm(pred) + 1e-12
+    cos_val = np.clip(float(np.dot(gt, pred) / denom), -1.0, 1.0)
+    return float(np.arccos(cos_val))
 
 
 def plot_error_map(gt_flat: np.ndarray, pred_flat: np.ndarray, image_shape: tuple[int, int], out_path: Path) -> None:
