@@ -1,0 +1,38 @@
+# Python 临时文件
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE / 本地配置
+.idea/
+.vscode/
+.agents/
+
+# 训练输出：这些文件会很大，而且每次训练都会变
+checkpoints/
+results/
+results_infer/
+runs/
+
+# 本地数据缓存
+data_cache*/
+*.npy
+*.npz
+*.mat
+
+# 模型和日志大文件
+*.pt
+*.pth
+*.ckpt
+events.out.tfevents.*
+
+# 图片输出通常由脚本自动生成，不作为源码提交
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+
+# 系统文件
+Thumbs.db
+.DS_Store
