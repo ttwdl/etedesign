@@ -713,7 +713,7 @@ def main() -> None:
             best_val_score = val_score
             torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse, best_val_score), best_path)
             save_structure_csv(model, results_dir / "ar_emt_best_structure.csv")
-            print(f"  ✔ 新的 best，已保存: {best_path}")
+            print(f"  new best saved: {best_path}")
         print()
 
     if writer is not None:
