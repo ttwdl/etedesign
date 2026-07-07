@@ -570,6 +570,35 @@ def measurement_matrix_coherence(transmission: torch.Tensor) -> torch.Tensor:
     return off.square().sum() / (n * (n - 1))
 
 
+def differentiable_tor_percent(transmission: torch.Tensor) -> torch.Tensor:
+    """可参与训练的 tor 指标，单位是百分比，越大表示通道越不一样。
+
+    它和后面汇报用的 tor_percent 思路一致：
+    16 个通道两两比较，算 mean(|T_i - T_j|) * 100；
+    然后取最小的那一对，表示“最像的两个通道仍然差多少”。
+
+    tor_percent() 是给打印/评估用的，会 detach 到 CPU，不能反向传播；
+    这里保留 torch 计算图，所以可以放进 loss 里推动滤光片拉开差异。
+
+    如果 transmission 是 [B,16,151]，说明这一批每条光谱入射角不同；
+    这里先对 batch/角度取平均，得到一个代表性的 [16,151] 再算 tor。
+    """
+
+    t = transmission
+    if t.ndim == 3:
+        t = t.mean(dim=0)
+    t = t.real if torch.is_complex(t) else t
+
+    diffs = []
+    n_ch = t.shape[0]
+    for i in range(n_ch):
+        for j in range(i + 1, n_ch):
+            diffs.append(torch.mean(torch.abs(t[i] - t[j])) * 100.0)
+    if not diffs:
+        return torch.zeros((), device=t.device, dtype=t.dtype)
+    return torch.min(torch.stack(diffs))
+
+
 def sam_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """光谱角损失（可导版），返回平均弧度。
 

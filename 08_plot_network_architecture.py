@@ -12,7 +12,7 @@
 2. 光学编码器 = 可训练物理结构 + 可微 TMM；
 3. 16 个滤光片把 151 维光谱压成 16 维测量（训练时还会加噪声）；
 4. MLP 解码器（16→512→256→151，输出经 Softplus 保证非负）把测量重建回光谱；
-5. loss = MSE + L1 + diff_L1 + 光谱角 + 吞吐量约束 + 通道去相关。
+5. loss = MSE + L1 + diff_L1 + 光谱角 + 吞吐量约束 + 通道去相关 + tor 下限。
 
 注意：这张图纯手绘示意，改了模型结构记得也来这里同步文字，别让图“说谎”。
 """
@@ -38,7 +38,7 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "output_dir": "results_hctotal_ar10_50",
+    "output_dir": "results_longtor_50",
     "output_stem": "network_architecture_ppt",
 }
 
@@ -154,7 +154,8 @@ def main() -> None:
     add_box(ax, (3.30, 0.70), (4.25, 1.45), "训练目标 (loss)",
             "loss = MSE(Ŝ,S) + λ_l1·L1\n"
             "     + λ_diff·一阶差分L1 + λ_sam·光谱角\n"
-            "     + λ_trans·吞吐量惩罚\n     + λ_coh·通道去相关", "#f9e79f", body_size=9.5)
+            "     + λ_trans·吞吐量惩罚\n"
+            "     + λ_coh·通道去相关 + λ_tor·tor下限", "#f9e79f", body_size=9.5)
 
     add_box(ax, (0.55, 0.70), (2.55, 1.45), "会被更新的参数",
             "编码器: ρ[16], H_total, h_c[16], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)

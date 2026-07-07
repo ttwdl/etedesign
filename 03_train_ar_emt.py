@@ -18,6 +18,7 @@
        + lambda_sam  · 光谱角      (轻微保住谱形，防止把峰抹平)
        + lambda_trans· 吞吐量惩罚  (别让滤光片整体太暗)
        + lambda_coh  · 通道去相关  (让 16 个滤光片形状尽量互补, 重建更好还原)
+       + lambda_tor  · tor 下限约束 (让最相似的两个通道也至少拉开一点)
 
 约定：
   - best checkpoint 看 val_recon_loss；test 集完全不碰，留给 04_eval_report.py 做最终汇报。
@@ -51,6 +52,7 @@ from ar_emt_common import (
     AREMTModel,
     GeometryConfig,
     add_measurement_noise,
+    differentiable_tor_percent,
     emt_condition,
     evaluate_fixed_angle,
     geometry_report,
@@ -69,9 +71,9 @@ USER_SETTINGS = {
     # ---- 路径 ----
     # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-    "checkpoint_dir": "checkpoints_hctotal_ar10_50",
-    "results_dir": "results_hctotal_ar10_50",
-    "tensorboard_dir": "runs/ar_emt_hctotal_ar10_50",
+    "checkpoint_dir": "checkpoints_longtor_50",
+    "results_dir": "results_longtor_50",
+    "tensorboard_dir": "runs/ar_emt_longtor_50",
 
     # ---- 设备 / 复现 ----
     "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
@@ -97,8 +99,8 @@ USER_SETTINGS = {
     "hidden_dims": (512, 256),
     "h_c_range": (250.0, 1500.0),
     "t_r_range": (0.0, 1500.0),
-    "core_total_nm": 650.0,
-    "core_total_range": (450.0, 1800.0),
+    "core_total_nm": 1000.0,
+    "core_total_range": (800.0, 1800.0),
     "aspect_ratio_max": 10.0,
 
     # ---- 测量噪声（重要）----
@@ -115,6 +117,8 @@ USER_SETTINGS = {
     "lambda_sam": 0.05,     # 光谱角权重：轻微保住谱形；不想要就设 0
     "lambda_l1": 0.10,      # 逐点 L1 权重：逼每个波长点更贴近
     "lambda_diff": 0.20,    # 一阶差分 L1 权重：逼曲线起伏、谱峰边缘更贴近
+    "tor_target_percent": 2.0,  # 希望最相似的两个滤光片也至少相差约 2%
+    "lambda_tor": 0.01,         # tor 下限约束权重；先温和开，太大会牺牲重建精度
 
     # ---- 优化器 ----
     # 物理结构参数和解码器分两组：结构参数学习率更小、不加 weight decay。
@@ -271,7 +275,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
 # ---- 训练日志：只记“训练/验证曲线 + 关键光学量”，结构参数另存一份 CSV ----
 TRAIN_LOG_HEADER = [
     "epoch", "lr_physics", "lr_decoder",
-    "train_loss", "train_mse", "train_l1", "train_diff_l1",
+    "train_loss", "train_mse", "train_l1", "train_diff_l1", "train_tor_percent", "train_tor_penalty",
     "val_recon_loss", "val_mse", "val_l1", "val_diff_l1", "val_psnr", "val_sam",
     "T0_mean", "T0_min", "tor_percent", "coherence0", "grad_norm",
 ]
@@ -372,6 +376,7 @@ def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMT
     writer.add_scalar("loss/train_mse", float(row["train_mse"]), epoch)
     writer.add_scalar("loss/train_l1", float(row["train_l1"]), epoch)
     writer.add_scalar("loss/train_diff_l1", float(row["train_diff_l1"]), epoch)
+    writer.add_scalar("loss/train_tor_penalty", float(row["train_tor_penalty"]), epoch)
     writer.add_scalar("loss/val_recon_loss", float(row["val_recon_loss"]), epoch)
     writer.add_scalar("loss/val_mse", float(row["val_mse"]), epoch)
     writer.add_scalar("loss/val_l1", float(row["val_l1"]), epoch)
@@ -381,6 +386,7 @@ def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMT
     writer.add_scalar("optics/T0_mean", float(row["T0_mean"]), epoch)
     writer.add_scalar("optics/T0_min", float(row["T0_min"]), epoch)
     writer.add_scalar("optics/tor_percent", float(row["tor_percent"]), epoch)
+    writer.add_scalar("optics/train_tor_percent", float(row["train_tor_percent"]), epoch)
     writer.add_scalar("optics/coherence0", float(row["coherence0"]), epoch)
     writer.add_scalar("train/grad_norm", float(row["grad_norm"]), epoch)
     writer.add_scalar("train/lr_physics", float(row["lr_physics"]), epoch)
@@ -471,7 +477,7 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
     perm = torch.randperm(n_train)  # 每个 epoch 打乱一次样本顺序
 
     # 累加器，用来算这一轮的平均值
-    loss_sum = mse_sum = l1_sum = diff_l1_sum = t_mean_sum = coh_sum = 0.0
+    loss_sum = mse_sum = l1_sum = diff_l1_sum = t_mean_sum = coh_sum = tor_sum = tor_penalty_sum = 0.0
     grad_norm_last = 0.0
     n_seen = 0
     epoch_start = time.time()
@@ -513,6 +519,14 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         if settings["lambda_coh"] > 0:                              # 去相关约束：逼 16 个滤光片互补
             loss = loss + settings["lambda_coh"] * coh
 
+        tor_train = differentiable_tor_percent(t_use)                # 可导 tor，单位 %
+        tor_target = torch.tensor(settings["tor_target_percent"], device=device, dtype=tor_train.dtype)
+        # 用“相对缺口”做惩罚：tor 达不到目标才罚，达到后不再继续逼它变大。
+        # 例如 target=2%、当前 tor=1%，缺口=(2-1)/2=0.5，惩罚=0.25。
+        loss_tor = torch.relu((tor_target - tor_train) / (tor_target + 1e-8)).square()
+        if settings["lambda_tor"] > 0:
+            loss = loss + settings["lambda_tor"] * loss_tor
+
         # ---------------- 反向 + 更新 ----------------
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -527,6 +541,8 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         diff_l1_sum += float(loss_diff_l1.detach().cpu()) * bs
         t_mean_sum += float(t_mean.detach().cpu()) * bs
         coh_sum += float(coh.detach().cpu()) * bs
+        tor_sum += float(tor_train.detach().cpu()) * bs
+        tor_penalty_sum += float(loss_tor.detach().cpu()) * bs
         grad_norm_last = float(grad_norm.detach().cpu())
         n_seen += bs
 
@@ -538,12 +554,14 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
                 writer.add_scalar("batch/mse", float(loss_mse.detach().cpu()), gb)
                 writer.add_scalar("batch/l1", float(loss_l1.detach().cpu()), gb)
                 writer.add_scalar("batch/diff_l1", float(loss_diff_l1.detach().cpu()), gb)
+                writer.add_scalar("batch/tor_percent", float(tor_train.detach().cpu()), gb)
             elapsed = time.time() - epoch_start
             pct = batch_index / n_batches * 100.0
             print(f"\repoch {epoch:04d}/{n_epochs} batch {batch_index:04d}/{n_batches:04d} ({pct:5.1f}%) | "
                   f"loss={float(loss.detach().cpu()):.4e} | mse={float(loss_mse.detach().cpu()):.4e} | "
                   f"l1={float(loss_l1.detach().cpu()):.4e} | diff={float(loss_diff_l1.detach().cpu()):.4e} | "
-                  f"Tmean={float(t_mean.detach().cpu()):.4f} | coh={float(coh.detach().cpu()):.4f} | "
+                  f"Tmean={float(t_mean.detach().cpu()):.4f} | tor={float(tor_train.detach().cpu()):.3f}% | "
+                  f"coh={float(coh.detach().cpu()):.4f} | "
                   f"grad={grad_norm_last:.3e} | {elapsed:6.1f}s", end="", flush=True)
     print()
 
@@ -552,6 +570,8 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         "train_mse": mse_sum / n_seen,
         "train_l1": l1_sum / n_seen,
         "train_diff_l1": diff_l1_sum / n_seen,
+        "train_tor_percent": tor_sum / n_seen,
+        "train_tor_penalty": tor_penalty_sum / n_seen,
         "train_Tmean": t_mean_sum / n_seen,
         "train_coherence": coh_sum / n_seen,
         "grad_norm": grad_norm_last,
@@ -609,7 +629,8 @@ def main() -> None:
     print(f"epochs={settings['epochs']}, batch_size={settings['batch_size']}, angle_mode={settings['angle_mode']}")
     print(f"noise: rel={settings['noise_rel']}, abs={settings['noise_abs']} | "
           f"lambda: trans={settings['lambda_trans']}, coh={settings['lambda_coh']}, "
-          f"sam={settings['lambda_sam']}, l1={settings['lambda_l1']}, diff={settings['lambda_diff']}")
+          f"sam={settings['lambda_sam']}, l1={settings['lambda_l1']}, diff={settings['lambda_diff']}, "
+          f"tor={settings['lambda_tor']}@{settings['tor_target_percent']}%")
     print(f"训练日志: {train_log_path}")
     print(f"训练曲线: {progress_plot_path}")
     print(f"看 TensorBoard: 运行 06_start_tensorboard.py")
@@ -647,6 +668,8 @@ def main() -> None:
             "train_mse": train_info["train_mse"],
             "train_l1": train_info["train_l1"],
             "train_diff_l1": train_info["train_diff_l1"],
+            "train_tor_percent": train_info["train_tor_percent"],
+            "train_tor_penalty": train_info["train_tor_penalty"],
             "val_recon_loss": val_score,
             "val_mse": val_metrics["mse"],
             "val_l1": val_metrics["l1"],
@@ -678,7 +701,8 @@ def main() -> None:
               f"val_l1={row['val_l1']:.6e} | diff={row['val_diff_l1']:.6e} | "
               f"psnr={row['val_psnr']:.2f} | sam={row['val_sam']:.4f} | "
               f"T0_mean={row['T0_mean']:.4f} T0_min={row['T0_min']:.4f} | "
-              f"tor={row['tor_percent']:.3f}% coh={row['coherence0']:.4f} | grad={row['grad_norm']:.3e}")
+              f"train_tor={row['train_tor_percent']:.3f}% eval_tor={row['tor_percent']:.3f}% "
+              f"coh={row['coherence0']:.4f} | grad={row['grad_norm']:.3e}")
         print_structure_brief(model)
 
         # 只有验证集重建总分创新低时，才更新 best checkpoint
