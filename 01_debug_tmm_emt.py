@@ -1,13 +1,13 @@
-"""调试 AR-EMT 几何约束、EMT 条件和可微 TMM。
+"""调试 AR-EMT 的几何约束、EMT 条件和可微 TMM（只检查，不训练）。
 
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 01_debug_tmm_emt.py
 
-这个脚本不训练，只做四件事：
-1. 打印 D/P、D、gap、EMT 条件；
-2. 快速对比不同 AR 层序的透过率；
-3. 检查 TMM 是否能反向传播到结构参数；
-4. 保存初始 16 通道透过谱图。
+它做四件事，帮你在正式训练前确认“物理部分是对的、梯度能传回去”：
+1. 打印几何约束(D/P、D、gap)和 EMT 条件；
+2. 快速对比几种 AR 层序的透过率高低，看看增透趋势对不对；
+3. 检查 TMM 的梯度能不能反向传播到结构参数（能，才谈得上训练）；
+4. 存一张初始 16 通道透过谱图，肉眼看看形状。
 """
 
 from __future__ import annotations
@@ -33,9 +33,9 @@ from ar_emt_common import (
 )
 
 
-# =========================
+# =============================================================================
 # 用户设置区：平时只改这里
-# =========================
+# =============================================================================
 USER_SETTINGS = {
     "period_nm": 180.0,
     "g_min_nm": 40.0,
@@ -47,10 +47,10 @@ USER_SETTINGS = {
 
 
 def qw_thickness_for_order(order: str, lambda0_nm: float = 530.0) -> list[float]:
-    """按层序字符串生成四分之一波厚度。
+    """按层序字符串生成“四分之一波长”厚度。
 
-    L 表示 SiO2，H 表示 TiO2。
-    例如 "LH" 表示先 SiO2 再 TiO2。
+    L 表示 SiO2，H 表示 TiO2。例如 "LH" = 先 SiO2 再 TiO2。
+    只用于本调试脚本里试不同层序，正式训练固定用 L-H / H-L。
     """
 
     n_map = {"L": 1.46, "H": 2.35}
@@ -66,10 +66,10 @@ def build_order_transmission(
     t_r_nm: float = 50.0,
     alpha_deg: float = 0.0,
 ) -> torch.Tensor:
-    """只用于调试层序的 TMM 计算。
+    """只用于“试不同 AR 层序”的 TMM 计算（不是训练用的那条固定层序）。
 
-    训练脚本固定使用 air / L-H / SU-8 / EMT / H-L / fused silica。
-    这里多试几个顺序，是为了确认增透结构趋势。
+    训练脚本固定用：空气 / L-H / SU-8 / EMT / H-L / 熔石英。
+    这里多试几种顺序，只是为了确认“加了增透层，透过率确实变高”这个趋势。
     """
 
     n_struct = ratio.numel()
@@ -80,40 +80,34 @@ def build_order_transmission(
     n_layers = [const_layer("air")]
     d_layers = []
 
+    # 顶部 AR 层：按 top_order 一层层加
     for ch, thick in zip(top_order, qw_thickness_for_order(top_order)):
         n_layers.append(const_layer("sio2" if ch == "L" else "tio2"))
         d_layers.append(torch.tensor(thick, device=wl_nm.device))
 
+    # 残余 SU-8 + EMT 腔
     n_layers.append(const_layer("su8"))
     d_layers.append(torch.tensor(t_r_nm, device=wl_nm.device))
-
     n_layers.append(emt_neff_from_ratio(ratio, wl_nm))
     d_layers.append(torch.tensor(h_c_nm, device=wl_nm.device))
 
+    # 底部 AR 层
     for ch, thick in zip(bottom_order, qw_thickness_for_order(bottom_order)):
         n_layers.append(const_layer("sio2" if ch == "L" else "tio2"))
         d_layers.append(torch.tensor(thick, device=wl_nm.device))
 
     n_layers.append(const_layer("fused_silica"))
     return tmm_transmission_unpolarized(
-        n_layers,
-        d_layers,
-        wl_nm,
-        torch.tensor([alpha_deg], device=wl_nm.device),
+        n_layers, d_layers, wl_nm, torch.tensor([alpha_deg], device=wl_nm.device),
     )[0]
 
 
 def summarize_t(name: str, t_matrix: torch.Tensor) -> None:
-    """打印一组透过谱的关键数字。"""
+    """打印一组透过谱的关键数字（均值/最小/最大/区分度）。"""
 
     t = t_matrix.detach()
-    print(
-        f"{name:16s} "
-        f"T_mean={float(t.mean()):.4f}, "
-        f"T_min={float(t.min()):.4f}, "
-        f"T_max={float(t.max()):.4f}, "
-        f"tor={tor_percent(t):.3f}%"
-    )
+    print(f"{name:16s} T_mean={float(t.mean()):.4f}, T_min={float(t.min()):.4f}, "
+          f"T_max={float(t.max()):.4f}, tor={tor_percent(t):.3f}%")
 
 
 def main() -> None:
@@ -131,51 +125,46 @@ def main() -> None:
     print(geometry_report(config))
     print()
 
+    # 波长网格 + 16 个通道的 D/P（在可行区间里均匀铺开）
     wl_nm = torch.linspace(400.0, 700.0, 151, device=device)
     limits = geometry_limits(config)
     ratio = torch.linspace(limits["r_min"], limits["r_max"], 16, device=device)
 
-    print("层序快速对比：所有厚度先用四分之一波初值")
+    # ---- (1)(2) 层序快速对比：所有厚度先用四分之一波初值 ----
+    print("层序快速对比（所有厚度先用四分之一波初值）：")
     t_hl_lh = build_order_transmission(ratio, wl_nm, top_order="HL", bottom_order="LH")
     t_lh_hl = build_order_transmission(ratio, wl_nm, top_order="LH", bottom_order="HL")
     t_no_ar = build_order_transmission(ratio, wl_nm, top_order="", bottom_order="")
     summarize_t("HL / LH", t_hl_lh)
     summarize_t("LH / HL", t_lh_hl)
-    summarize_t("no AR", t_no_ar)
+    summarize_t("no AR", t_no_ar)   # 没有增透层做对照，应明显更低
     print()
 
-    print("检查 TMM 梯度是否能传回结构参数")
+    # ---- (3) 检查 TMM 梯度能不能传回结构参数 ----
+    print("检查 TMM 梯度是否能传回结构参数：")
     model = AREMTModel(wl_nm.cpu(), config).to(device)
     t0 = model.transmission(torch.tensor([0.0], device=device))[0]
     loss = t0.mean()
-    loss.backward()
+    loss.backward()   # 只要能 backward 且各参数 grad 不为 0，就说明结构参数可训练
     print(f"  mean(T) = {float(loss.detach()):.6f}")
-    print(f"  rho grad norm = {float(model.rho.grad.norm()):.6e}")
-    print(f"  h_c grad = {float(model.raw_h_c.grad):.6e}")
-    print(f"  t_r grad = {float(model.raw_t_r.grad):.6e}")
-    print(f"  AR thickness grad norm = {float(model.raw_ar.grad.norm()):.6e}")
+    print(f"  rho grad norm       = {float(model.rho.grad.norm()):.6e}")
+    print(f"  h_c grad            = {float(model.raw_h_c.grad):.6e}")
+    print(f"  t_r grad            = {float(model.raw_t_r.grad):.6e}")
+    print(f"  AR thickness grad   = {float(model.raw_ar.grad.norm()):.6e}")
     print()
 
+    # ---- (4) 存初始透过谱图 ----
     params = model.physical_parameters()
     t_init_0 = build_ar_emt_transmission(
-        params["ratio"],
-        params["h_c_nm"],
-        params["t_r_nm"],
-        params["ar_nm"],
-        wl_nm,
-        torch.tensor([0.0], device=device),
+        params["ratio"], params["h_c_nm"], params["t_r_nm"], params["ar_nm"],
+        wl_nm, torch.tensor([0.0], device=device),
     )[0]
     t_init_5 = build_ar_emt_transmission(
-        params["ratio"],
-        params["h_c_nm"],
-        params["t_r_nm"],
-        params["ar_nm"],
-        wl_nm,
-        torch.tensor([5.0], device=device),
+        params["ratio"], params["h_c_nm"], params["t_r_nm"], params["ar_nm"],
+        wl_nm, torch.tensor([5.0], device=device),
     )[0]
-
     summarize_t("initial 0deg", t_init_0)
-    summarize_t("initial 5deg", t_init_5)
+    summarize_t("initial 5deg", t_init_5)   # 换个入射角，确认斜入射也算得动
 
     plt.figure(figsize=(9, 5))
     for idx in range(t_init_0.shape[0]):

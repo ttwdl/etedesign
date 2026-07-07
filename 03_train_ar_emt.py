@@ -1,19 +1,25 @@
-"""训练 AR-EMT 光学编码器 + MLP 解码器。
+"""训练 AR-EMT 光学编码器 + MLP 解码器（主训练脚本）。
 
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 03_train_ar_emt.py
 
-平时只改下面 USER_SETTINGS，不需要在命令行后面加参数。
+平时只改下面的 USER_SETTINGS，不用在命令行加参数。
 
-当前训练目标：
-  输入一条 151 维光谱 S(λ)
-  -> 经过 16 个 AR-EMT 滤光片得到 16 个测量值
-  -> MLP 解码回 151 维光谱 Ŝ(λ)
-  -> 用 MSE 让 Ŝ(λ) 接近 S(λ)
+一句话流程：
+  一条 151 维光谱 S(λ)
+    → 经过 16 个 AR-EMT 滤光片，得到 16 个测量值（可选：给测量值加噪声）
+    → MLP 解码器还原出 151 维光谱 Ŝ(λ)
+    → 让 Ŝ(λ) 尽量接近 S(λ)。
 
-注意：
-  tor 只记录，不进 loss。
-  best checkpoint 只看 val_mse，test 集留到 04_eval_report.py 最终评估。
+损失(loss)由 4 项组成，后 3 项都能单独开关（把对应权重设 0 即可）：
+  loss = MSE(还原误差, 主目标)
+       + lambda_sam  · 光谱角      (轻微保住谱形，防止把峰抹平)
+       + lambda_trans· 吞吐量惩罚  (别让滤光片整体太暗)
+       + lambda_coh  · 通道去相关  (让 16 个滤光片形状尽量互补, 重建更好还原)
+
+约定：
+  - best checkpoint 只看 val_mse；test 集完全不碰，留给 04_eval_report.py 做最终汇报。
+  - 训练时用带噪声 + 随机入射角的测量；验证/评估用干净、0 度的测量。
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # 不弹窗，直接存图（服务器/后台跑也不会报错）
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -36,71 +42,82 @@ from torch.utils.tensorboard import SummaryWriter
 from ar_emt_common import (
     AREMTModel,
     GeometryConfig,
+    add_measurement_noise,
     emt_condition,
     evaluate_fixed_angle,
     geometry_report,
+    measurement_matrix_coherence,
+    sam_loss,
     structure_rows,
     tor_percent,
 )
 
 
-# =========================
+# =============================================================================
 # 用户设置区：平时只改这里
-# =========================
+# =============================================================================
 USER_SETTINGS = {
-    # 新 absolute 数据缓存。先运行 02_prepare_data.py 生成。
+    # ---- 路径 ----
+    # absolute 数据缓存目录。先运行 02_prepare_data.py 生成。
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
-
-    # 输出目录。重构后重新训练，旧目录已经清空。
     "checkpoint_dir": "checkpoints",
     "results_dir": "results",
     "tensorboard_dir": "runs/ar_emt_live",
 
-    # 设备。电脑有 NVIDIA GPU 时用 cuda，没有就改成 cpu。
-    "device": "cuda",
+    # ---- 设备 / 复现 ----
+    "device": "cuda",      # 有 NVIDIA GPU 用 cuda，没有就改 cpu
     "seed": 2026,
 
-    # 训练规模。想快速试跑可以把 epochs 改成 2 或 3。
-    "epochs": 150,
+    # ---- 训练规模 ----
+    "epochs": 150,         # 想快速试跑改成 2~3
     "batch_size": 512,
     "eval_batch_size": 4096,
 
-    # 训练入射角。per_sample 表示每条光谱随机一个 0-5 度角。
-    # fixed0 更快，但只学 0 度。
-    "angle_mode": "per_sample",  # fixed0 / per_batch / per_sample
+    # ---- 入射角 ----
+    # 训练时给每条光谱一个随机入射角，让模型对小角度更稳。
+    #   fixed0     : 只用 0 度（最快，但只学 0 度）
+    #   per_batch  : 每个 batch 随机一个角度
+    #   per_sample : 每条光谱各自随机一个角度（最贴近真实，但最慢）
+    "angle_mode": "per_sample",
     "angle_max_deg": 5.0,
 
-    # 测量噪声。这里是加在 16 通道测量值上的很小噪声。
-    # absolute 数据保持积分和，测量值可能比 0-1 大，所以这个值先设很小。
-    "noise_max": 0.0,
+    # ---- 测量噪声（重要）----
+    # 真实探测器一定有噪声；干净训练会让重建“纸面好看、上机就崩”，所以默认开一点。
+    #   noise_rel : 相对(光度)噪声, 正比信号本身, 与数据尺度无关, 最稳妥。0.01 = 1%。
+    #   noise_abs : 绝对(读出)噪声, 固定大小; 需要时按你测量值尺度设(如 0.02)。默认关。
+    "noise_rel": 0.01,
+    "noise_abs": 0.0,
 
-    # loss = MSE + lambda_trans * max(0, T_target - T_mean)^2
-    # 透过率约束只是防止滤光片太暗，主目标仍是重建 MSE。
-    "t_target": 0.75,
-    "lambda_trans": 0.05,
+    # ---- loss 各项权重 ----
+    "t_target": 0.75,       # 吞吐量下限目标：希望 16 条透过谱的平均透过率别低于它
+    "lambda_trans": 0.05,   # 吞吐量惩罚权重
+    "lambda_coh": 0.02,     # 通道去相关权重(新增)：越大越逼 16 个滤光片形状互补
+    "lambda_sam": 0.05,     # 光谱角权重(新增)：轻微保住谱形；不想要就设 0
 
-    # 优化器：decoder 用 weight decay，物理结构参数不加 weight decay。
+    # ---- 优化器 ----
+    # 物理结构参数和解码器分两组：结构参数学习率更小、不加 weight decay。
     "decoder_lr": 1e-3,
     "physics_lr": 2e-4,
     "decoder_weight_decay": 1e-4,
     "grad_clip_norm": 1.0,
 
-    # 学习率调度：val_mse 连续几次不降，就把学习率乘 factor。
+    # ---- 学习率自动衰减 ----
+    # val_mse 连续 patience 次不下降，就把学习率乘以 factor。
     "scheduler_patience": 5,
     "scheduler_factor": 0.5,
     "scheduler_min_lr": 1e-6,
 
-    # 进度显示和保存频率。
-    "progress_every_batches": 20,
-    "eval_every_epochs": 1,
-    "save_live_plots": True,
-    "use_tensorboard": True,
+    # ---- 显示 / 保存 ----
+    "progress_every_batches": 20,   # 每多少个 batch 刷新一次进度行
+    "eval_every_epochs": 1,         # 每多少个 epoch 评估+保存一次
+    "save_live_plots": True,        # 是否边训练边存曲线图
+    "use_tensorboard": True,        # 是否写 TensorBoard(用 06_start_tensorboard.py 打开)
 
-    # resume=True 时，如果 checkpoints/ar_emt_last.pt 存在，就接着训练。
-    # 如果你想从头重新训练，把它改成 False。
+    # resume=True 且存在 last checkpoint 时，接着上次继续训练。
+    # 想从头重训就改成 False（并清空/换掉旧 checkpoint 目录）。
     "resume": True,
 
-    # 几何约束。
+    # ---- 几何约束 ----
     "period_nm": 180.0,
     "g_min_nm": 40.0,
     "d_min_nm": 60.0,
@@ -108,8 +125,13 @@ USER_SETTINGS = {
 }
 
 
+# =============================================================================
+# 一些小工具
+# =============================================================================
+
+
 def set_seed(seed: int) -> None:
-    """固定随机种子，方便复现。"""
+    """固定随机种子，让每次训练尽量可复现。"""
 
     random.seed(seed)
     np.random.seed(seed)
@@ -119,7 +141,7 @@ def set_seed(seed: int) -> None:
 
 
 def load_cache(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """读取 02_prepare_data.py 生成的缓存。"""
+    """读取 02_prepare_data.py 生成的 train/val/test/wl 缓存。"""
 
     train_path = data_dir / "train_spectra.npy"
     val_path = data_dir / "val_spectra.npy"
@@ -144,7 +166,7 @@ def load_cache(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
 
 
 def make_alpha(batch_size: int, settings: dict, device: torch.device) -> torch.Tensor:
-    """生成训练时使用的入射角。"""
+    """按 angle_mode 生成本次训练用的入射角(度)。"""
 
     mode = settings["angle_mode"]
     max_deg = float(settings["angle_max_deg"])
@@ -158,37 +180,23 @@ def make_alpha(batch_size: int, settings: dict, device: torch.device) -> torch.T
 
 
 def make_optimizer(model: AREMTModel, settings: dict) -> torch.optim.Optimizer:
-    """创建 AdamW 优化器。
-
-    分两组参数：
-    1. 物理结构参数：rho、h_c、t_r、AR 厚度，不加 weight decay；
-    2. decoder 参数：MLP 权重和偏置，加很小 weight decay，减少过拟合。
+    """创建 AdamW，分两组参数：
+    1) 物理结构参数(rho/h_c/t_r/AR)：学习率小，不加 weight decay；
+    2) 解码器参数：学习率大，加一点 weight decay 抑制过拟合。
     """
 
     physics_params = [model.rho, model.raw_h_c, model.raw_t_r, model.raw_ar]
     return torch.optim.AdamW(
         [
-            {
-                "params": physics_params,
-                "lr": settings["physics_lr"],
-                "weight_decay": 0.0,
-                "name": "physics",
-            },
-            {
-                "params": model.decoder.parameters(),
-                "lr": settings["decoder_lr"],
-                "weight_decay": settings["decoder_weight_decay"],
-                "name": "decoder",
-            },
+            {"params": physics_params, "lr": settings["physics_lr"], "weight_decay": 0.0, "name": "physics"},
+            {"params": model.decoder.parameters(), "lr": settings["decoder_lr"],
+             "weight_decay": settings["decoder_weight_decay"], "name": "decoder"},
         ]
     )
 
 
 def make_scheduler(optimizer: torch.optim.Optimizer, settings: dict):
-    """创建学习率调度器。
-
-    val_mse 如果长时间不下降，就自动降低学习率。
-    """
+    """val_mse 长时间不降就自动降低学习率。"""
 
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -199,8 +207,8 @@ def make_scheduler(optimizer: torch.optim.Optimizer, settings: dict):
     )
 
 
-def save_csv(rows: list[dict[str, float | int | str]], path: Path) -> None:
-    """保存 CSV，小表格统一用这个函数。"""
+def save_csv(rows: list[dict], path: Path) -> None:
+    """把一组字典存成 CSV。"""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -211,53 +219,34 @@ def save_csv(rows: list[dict[str, float | int | str]], path: Path) -> None:
         writer.writerows(rows)
 
 
-def init_train_log(path: Path) -> None:
-    """初始化训练日志 CSV。"""
+# ---- 训练日志：只记“训练/验证曲线 + 关键光学量”，结构参数另存一份 CSV ----
+TRAIN_LOG_HEADER = [
+    "epoch", "lr_physics", "lr_decoder",
+    "train_loss", "train_mse", "val_mse", "val_psnr", "val_sam",
+    "T0_mean", "T0_min", "tor_percent", "coherence0", "grad_norm",
+]
 
-    header = [
-        "epoch",
-        "lr_physics",
-        "lr_decoder",
-        "train_loss",
-        "train_mse",
-        "train_Tmean",
-        "val_mse",
-        "val_psnr",
-        "val_sam",
-        "T0_mean",
-        "T0_min",
-        "tor_percent",
-        "grad_norm",
-        "h_c_nm",
-        "t_r_nm",
-        "top_L_nm",
-        "top_H_nm",
-        "bottom_H_nm",
-        "bottom_L_nm",
-        "ratio_min",
-        "ratio_max",
-        "D_min_nm",
-        "D_max_nm",
-        "emt_margin_nm",
-    ]
+
+def init_train_log(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=header)
-        writer.writeheader()
+        csv.DictWriter(f, fieldnames=TRAIN_LOG_HEADER).writeheader()
 
 
-def append_train_log(path: Path, row: dict[str, float | int]) -> None:
-    """向训练日志追加一行。"""
-
+def append_train_log(path: Path, row: dict) -> None:
     with path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        writer.writerow(row)
+        csv.DictWriter(f, fieldnames=TRAIN_LOG_HEADER).writerow(row)
 
 
 def save_structure_csv(model: AREMTModel, path: Path) -> None:
-    """保存每个通道的 D/P、D、gap、f、n_eff。"""
+    """保存每个通道的 D/P、D、gap、填充因子、n_eff。"""
 
     save_csv(structure_rows(model), path)
+
+
+# =============================================================================
+# 画图 / TensorBoard
+# =============================================================================
 
 
 def make_spectra_figure(model: AREMTModel) -> plt.Figure:
@@ -280,15 +269,12 @@ def make_spectra_figure(model: AREMTModel) -> plt.Figure:
 
 
 def save_progress_plot(log_path: Path, out_path: Path) -> None:
-    """把 train_log.csv 画成训练曲线图。"""
+    """把 train_log.csv 画成 4 张训练曲线：MSE / 平均透过率 / 区分度 / 学习率。"""
 
     if not log_path.exists():
         return
-
-    rows = []
     with log_path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows.extend(reader)
+        rows = list(csv.DictReader(f))
     if not rows:
         return
 
@@ -297,67 +283,49 @@ def save_progress_plot(log_path: Path, out_path: Path) -> None:
     val_mse = [float(r["val_mse"]) for r in rows]
     t_mean = [float(r["T0_mean"]) for r in rows]
     tor = [float(r["tor_percent"]) for r in rows]
+    coh = [float(r["coherence0"]) for r in rows]
     lr_decoder = [float(r["lr_decoder"]) for r in rows]
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 7))
     axes[0, 0].plot(epoch, train_mse, marker="o", label="train MSE")
     axes[0, 0].plot(epoch, val_mse, marker="o", label="val MSE")
     axes[0, 0].set_yscale("log")
-    axes[0, 0].set_xlabel("Epoch")
-    axes[0, 0].set_ylabel("MSE")
-    axes[0, 0].legend()
+    axes[0, 0].set_xlabel("Epoch"); axes[0, 0].set_ylabel("MSE"); axes[0, 0].legend()
 
     axes[0, 1].plot(epoch, t_mean, marker="o", color="tab:green")
-    axes[0, 1].set_xlabel("Epoch")
-    axes[0, 1].set_ylabel("T0_mean")
-    axes[0, 1].set_ylim(0.0, 1.05)
+    axes[0, 1].set_xlabel("Epoch"); axes[0, 1].set_ylabel("T0_mean"); axes[0, 1].set_ylim(0.0, 1.05)
 
-    axes[1, 0].plot(epoch, tor, marker="o", color="tab:orange")
-    axes[1, 0].set_xlabel("Epoch")
-    axes[1, 0].set_ylabel("tor (%)")
+    # 左下同时画 tor(区分度, 越大越好) 和 coherence(相关性, 越小越好)
+    axes[1, 0].plot(epoch, tor, marker="o", color="tab:orange", label="tor % (↑好)")
+    ax_coh = axes[1, 0].twinx()
+    ax_coh.plot(epoch, coh, marker="s", color="tab:red", label="coherence (↓好)")
+    axes[1, 0].set_xlabel("Epoch"); axes[1, 0].set_ylabel("tor (%)"); ax_coh.set_ylabel("coherence")
+    axes[1, 0].legend(loc="upper left"); ax_coh.legend(loc="upper right")
 
     axes[1, 1].plot(epoch, lr_decoder, marker="o", color="tab:purple")
     axes[1, 1].set_yscale("log")
-    axes[1, 1].set_xlabel("Epoch")
-    axes[1, 1].set_ylabel("decoder lr")
+    axes[1, 1].set_xlabel("Epoch"); axes[1, 1].set_ylabel("decoder lr")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)
     plt.close(fig)
 
 
-def write_tensorboard(
-    writer: SummaryWriter,
-    epoch: int,
-    row: dict[str, float | int],
-    model: AREMTModel,
-) -> None:
-    """把训练状态写入 TensorBoard。"""
+def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMTModel) -> None:
+    """把这一轮的关键数字写进 TensorBoard。"""
 
     writer.add_scalar("loss/train_loss", float(row["train_loss"]), epoch)
     writer.add_scalar("loss/train_mse", float(row["train_mse"]), epoch)
     writer.add_scalar("loss/val_mse", float(row["val_mse"]), epoch)
     writer.add_scalar("quality/val_psnr", float(row["val_psnr"]), epoch)
     writer.add_scalar("quality/val_sam", float(row["val_sam"]), epoch)
-
-    writer.add_scalar("optics/T_train_mean", float(row["train_Tmean"]), epoch)
     writer.add_scalar("optics/T0_mean", float(row["T0_mean"]), epoch)
     writer.add_scalar("optics/T0_min", float(row["T0_min"]), epoch)
     writer.add_scalar("optics/tor_percent", float(row["tor_percent"]), epoch)
-    writer.add_scalar("optics/emt_margin_nm", float(row["emt_margin_nm"]), epoch)
-
+    writer.add_scalar("optics/coherence0", float(row["coherence0"]), epoch)
     writer.add_scalar("train/grad_norm", float(row["grad_norm"]), epoch)
     writer.add_scalar("train/lr_physics", float(row["lr_physics"]), epoch)
     writer.add_scalar("train/lr_decoder", float(row["lr_decoder"]), epoch)
-
-    writer.add_scalar("structure/h_c_nm", float(row["h_c_nm"]), epoch)
-    writer.add_scalar("structure/t_r_nm", float(row["t_r_nm"]), epoch)
-    writer.add_scalar("structure/top_L_nm", float(row["top_L_nm"]), epoch)
-    writer.add_scalar("structure/top_H_nm", float(row["top_H_nm"]), epoch)
-    writer.add_scalar("structure/bottom_H_nm", float(row["bottom_H_nm"]), epoch)
-    writer.add_scalar("structure/bottom_L_nm", float(row["bottom_L_nm"]), epoch)
-    writer.add_scalar("structure/D_min_nm", float(row["D_min_nm"]), epoch)
-    writer.add_scalar("structure/D_max_nm", float(row["D_max_nm"]), epoch)
 
     fig = make_spectra_figure(model)
     writer.add_figure("spectra/current_0deg", fig, epoch)
@@ -365,18 +333,13 @@ def write_tensorboard(
     writer.flush()
 
 
-def checkpoint_dict(
-    model: AREMTModel,
-    optimizer: torch.optim.Optimizer,
-    scheduler,
-    config: GeometryConfig,
-    wl_nm: torch.Tensor,
-    settings: dict,
-    epoch: int,
-    best_val_mse: float,
-) -> dict:
-    """整理 checkpoint 内容。"""
+# =============================================================================
+# checkpoint 存 / 取
+# 注意：checkpoint 的字段(keys)保持不变，04/05/07 等脚本都按这些字段读取。
+# =============================================================================
 
+
+def checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse) -> dict:
     return {
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -389,15 +352,8 @@ def checkpoint_dict(
     }
 
 
-def load_resume_if_needed(
-    model: AREMTModel,
-    optimizer: torch.optim.Optimizer,
-    scheduler,
-    last_path: Path,
-    settings: dict,
-    device: torch.device,
-) -> tuple[int, float]:
-    """如果打开 resume，就从 last checkpoint 接着训。"""
+def load_resume_if_needed(model, optimizer, scheduler, last_path: Path, settings: dict, device) -> tuple[int, float]:
+    """如果开了 resume 且存在 last checkpoint，就从上次断点继续训练。"""
 
     if not settings["resume"] or not last_path.exists():
         return 1, math.inf
@@ -414,7 +370,7 @@ def load_resume_if_needed(
 
 
 def print_structure_brief(model: AREMTModel) -> None:
-    """在终端简短打印当前结构参数。"""
+    """终端里简短打印当前结构参数。"""
 
     params = model.physical_parameters()
     ratio = params["ratio"].detach().cpu()
@@ -424,100 +380,102 @@ def print_structure_brief(model: AREMTModel) -> None:
     period = model.config.period_nm
     emt = emt_condition(model.config, ratio.max())
     status = "OK" if emt["ok"] else "FAIL"
-    print(
-        f"  h_c={h_c:.2f} nm, t_r={t_r:.2f} nm, "
-        f"AR=[{ar[0]:.2f}, {ar[1]:.2f}, {ar[2]:.2f}, {ar[3]:.2f}] nm"
-    )
-    print(
-        f"  D/P=[{float(ratio.min()):.4f}, {float(ratio.max()):.4f}], "
-        f"D=[{float(ratio.min()) * period:.2f}, {float(ratio.max()) * period:.2f}] nm, "
-        f"EMT={status}, margin={emt['margin_nm']:.2f} nm"
-    )
+    print(f"  h_c={h_c:.2f} nm, t_r={t_r:.2f} nm, AR=[{ar[0]:.2f}, {ar[1]:.2f}, {ar[2]:.2f}, {ar[3]:.2f}] nm")
+    print(f"  D/P=[{float(ratio.min()):.4f}, {float(ratio.max()):.4f}], "
+          f"D=[{float(ratio.min()) * period:.2f}, {float(ratio.max()) * period:.2f}] nm, "
+          f"EMT={status}, margin={emt['margin_nm']:.2f} nm")
 
 
-def run_one_epoch(
-    model: AREMTModel,
-    train_cpu: torch.Tensor,
-    optimizer: torch.optim.Optimizer,
-    mse_fn: nn.Module,
-    settings: dict,
-    device: torch.device,
-    epoch: int,
-    n_epochs: int,
-    writer: SummaryWriter | None,
-) -> dict[str, float]:
-    """训练一个 epoch。"""
+# =============================================================================
+# 训练一个 epoch —— 这里是整套训练的“心脏”，看懂这段就看懂了全部
+# =============================================================================
+
+
+def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, n_epochs, writer) -> dict:
+    """训练一个 epoch，返回本轮的平均 loss / mse / 透过率 / 区分度等。"""
 
     model.train()
     batch_size = int(settings["batch_size"])
     n_train = train_cpu.shape[0]
     n_batches = math.ceil(n_train / batch_size)
-    perm = torch.randperm(n_train)
+    perm = torch.randperm(n_train)  # 每个 epoch 打乱一次样本顺序
 
-    loss_sum = 0.0
-    mse_sum = 0.0
-    t_mean_sum = 0.0
+    # 累加器，用来算这一轮的平均值
+    loss_sum = mse_sum = t_mean_sum = coh_sum = 0.0
     grad_norm_last = 0.0
     n_seen = 0
     epoch_start = time.time()
 
     for batch_index, start in enumerate(range(0, n_train, batch_size), start=1):
         idx = perm[start:start + batch_size]
-        batch = train_cpu[idx].to(device, non_blocking=True)
-        alpha = make_alpha(batch.shape[0], settings, device)
+        batch = train_cpu[idx].to(device, non_blocking=True)          # 真实光谱 S(λ), [B,151]
+        alpha = make_alpha(batch.shape[0], settings, device)          # 入射角(度)
 
-        pred, t_matrix = model(batch, alpha, noise_max=settings["noise_max"])
-        loss_mse = mse_fn(pred, batch)
-        t_mean = t_matrix.mean()
-        loss_trans = torch.relu(torch.tensor(settings["t_target"], device=device) - t_mean).square()
-        loss = loss_mse + settings["lambda_trans"] * loss_trans
+        # ---------------- 前向：把物理和网络串起来 ----------------
+        # 这几步故意写开，方便你看清数据怎么一步步变过去：
+        t = model.transmission(alpha)                                 # 16 条透过谱 [A,16,151]
+        t_use = t[0] if t.shape[0] == 1 else t                        # 供 measure 用的形状
+        meas = model.measure(batch, t_use)                            # 压成 16 个测量值 [B,16]
+        meas = add_measurement_noise(meas, settings["noise_rel"], settings["noise_abs"])  # 训练时加噪
+        pred = model.decoder(meas)                                    # 还原回 151 维 [B,151]
 
+        # ---------------- loss：主目标 + 三个约束 ----------------
+        loss_mse = mse_fn(pred, batch)                                # 主目标：还原误差
+        loss = loss_mse
+
+        if settings["lambda_sam"] > 0:                               # 谱形约束(可选)
+            loss = loss + settings["lambda_sam"] * sam_loss(pred, batch)
+
+        t_mean = t.mean()                                            # 平均透过率
+        if settings["lambda_trans"] > 0:                            # 吞吐量约束：别让滤光片太暗
+            loss_trans = torch.relu(torch.tensor(settings["t_target"], device=device) - t_mean).square()
+            loss = loss + settings["lambda_trans"] * loss_trans
+
+        coh = measurement_matrix_coherence(t_use)                    # 通道相关性(越小越好)
+        if settings["lambda_coh"] > 0:                              # 去相关约束：逼 16 个滤光片互补
+            loss = loss + settings["lambda_coh"] * coh
+
+        # ---------------- 反向 + 更新 ----------------
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings["grad_clip_norm"])
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings["grad_clip_norm"])  # 梯度裁剪防爆
         optimizer.step()
 
+        # ---------------- 累加 + 打印进度 ----------------
         bs = batch.shape[0]
         loss_sum += float(loss.detach().cpu()) * bs
         mse_sum += float(loss_mse.detach().cpu()) * bs
         t_mean_sum += float(t_mean.detach().cpu()) * bs
+        coh_sum += float(coh.detach().cpu()) * bs
         grad_norm_last = float(grad_norm.detach().cpu())
         n_seen += bs
 
-        if (
-            batch_index == 1
-            or batch_index == n_batches
-            or (settings["progress_every_batches"] > 0 and batch_index % settings["progress_every_batches"] == 0)
-        ):
-            global_batch = (epoch - 1) * n_batches + batch_index
+        if (batch_index == 1 or batch_index == n_batches
+                or (settings["progress_every_batches"] > 0 and batch_index % settings["progress_every_batches"] == 0)):
             if writer is not None:
-                writer.add_scalar("batch/loss", float(loss.detach().cpu()), global_batch)
-                writer.add_scalar("batch/mse", float(loss_mse.detach().cpu()), global_batch)
-                writer.add_scalar("batch/Tmean", float(t_mean.detach().cpu()), global_batch)
-                writer.add_scalar("batch/grad_norm", grad_norm_last, global_batch)
-
+                gb = (epoch - 1) * n_batches + batch_index
+                writer.add_scalar("batch/loss", float(loss.detach().cpu()), gb)
+                writer.add_scalar("batch/mse", float(loss_mse.detach().cpu()), gb)
             elapsed = time.time() - epoch_start
             pct = batch_index / n_batches * 100.0
-            print(
-                "\r"
-                f"epoch {epoch:04d}/{n_epochs} "
-                f"batch {batch_index:04d}/{n_batches:04d} ({pct:5.1f}%) | "
-                f"loss={float(loss.detach().cpu()):.4e} | "
-                f"mse={float(loss_mse.detach().cpu()):.4e} | "
-                f"Tmean={float(t_mean.detach().cpu()):.4f} | "
-                f"grad={grad_norm_last:.3e} | "
-                f"elapsed={elapsed:6.1f}s",
-                end="",
-                flush=True,
-            )
+            print(f"\repoch {epoch:04d}/{n_epochs} batch {batch_index:04d}/{n_batches:04d} ({pct:5.1f}%) | "
+                  f"loss={float(loss.detach().cpu()):.4e} | mse={float(loss_mse.detach().cpu()):.4e} | "
+                  f"Tmean={float(t_mean.detach().cpu()):.4f} | coh={float(coh.detach().cpu()):.4f} | "
+                  f"grad={grad_norm_last:.3e} | {elapsed:6.1f}s", end="", flush=True)
     print()
 
     return {
         "train_loss": loss_sum / n_seen,
         "train_mse": mse_sum / n_seen,
         "train_Tmean": t_mean_sum / n_seen,
+        "train_coherence": coh_sum / n_seen,
         "grad_norm": grad_norm_last,
     }
+
+
+# =============================================================================
+# 主流程
+# =============================================================================
 
 
 def main() -> None:
@@ -532,7 +490,7 @@ def main() -> None:
 
     train_cpu, val_cpu, _test_cpu, wl_nm = load_cache(Path(settings["data_dir"]))
     if device.type == "cuda":
-        train_cpu = train_cpu.pin_memory()
+        train_cpu = train_cpu.pin_memory()  # 锁页内存，CPU→GPU 拷贝更快
 
     config = GeometryConfig(
         period_nm=settings["period_nm"],
@@ -564,48 +522,35 @@ def main() -> None:
 
     print(f"device={device}")
     print(f"epochs={settings['epochs']}, batch_size={settings['batch_size']}, angle_mode={settings['angle_mode']}")
+    print(f"noise: rel={settings['noise_rel']}, abs={settings['noise_abs']} | "
+          f"lambda: trans={settings['lambda_trans']}, coh={settings['lambda_coh']}, sam={settings['lambda_sam']}")
     print(f"训练日志: {train_log_path}")
     print(f"训练曲线: {progress_plot_path}")
-    print(f"TensorBoard: http://localhost:6007")
+    print(f"看 TensorBoard: 运行 06_start_tensorboard.py")
     print()
 
     total_start = time.time()
     for epoch in range(start_epoch, int(settings["epochs"]) + 1):
         train_info = run_one_epoch(
-            model=model,
-            train_cpu=train_cpu,
-            optimizer=optimizer,
-            mse_fn=mse_fn,
-            settings=settings,
-            device=device,
-            epoch=epoch,
-            n_epochs=int(settings["epochs"]),
-            writer=writer,
+            model, train_cpu, optimizer, mse_fn, settings, device,
+            epoch, int(settings["epochs"]), writer,
         )
 
+        # 不到评估轮次就跳过后面的评估/保存(最后一轮一定评估)
         if epoch % settings["eval_every_epochs"] != 0 and epoch != int(settings["epochs"]):
             continue
 
-        val_metrics = evaluate_fixed_angle(
-            model,
-            val_cpu,
-            angle_deg=0.0,
-            batch_size=settings["eval_batch_size"],
-        )
+        # ---- 验证：干净、0 度 ----
+        val_metrics = evaluate_fixed_angle(model, val_cpu, angle_deg=0.0, batch_size=settings["eval_batch_size"])
         scheduler.step(val_metrics["mse"])
 
+        # ---- 记录当前 0 度滤光片的几个观察量 ----
         with torch.no_grad():
             t0 = model.transmission(torch.tensor([0.0], device=device))[0]
             tor = tor_percent(t0)
+            coherence0 = float(measurement_matrix_coherence(t0).detach().cpu())
             t_mean_eval = float(t0.mean().detach().cpu())
             t_min_eval = float(t0.min().detach().cpu())
-
-        params = model.physical_parameters()
-        ratio_cpu = params["ratio"].detach().cpu()
-        ar_cpu = params["ar_nm"].detach().cpu()
-        h_c_cpu = float(params["h_c_nm"].detach().cpu())
-        t_r_cpu = float(params["t_r_nm"].detach().cpu())
-        emt = emt_condition(model.config, ratio_cpu.max())
 
         row = {
             "epoch": epoch,
@@ -613,29 +558,18 @@ def main() -> None:
             "lr_decoder": optimizer.param_groups[1]["lr"],
             "train_loss": train_info["train_loss"],
             "train_mse": train_info["train_mse"],
-            "train_Tmean": train_info["train_Tmean"],
             "val_mse": val_metrics["mse"],
             "val_psnr": val_metrics["psnr"],
             "val_sam": val_metrics["sam"],
             "T0_mean": t_mean_eval,
             "T0_min": t_min_eval,
             "tor_percent": tor,
+            "coherence0": coherence0,
             "grad_norm": train_info["grad_norm"],
-            "h_c_nm": h_c_cpu,
-            "t_r_nm": t_r_cpu,
-            "top_L_nm": float(ar_cpu[0]),
-            "top_H_nm": float(ar_cpu[1]),
-            "bottom_H_nm": float(ar_cpu[2]),
-            "bottom_L_nm": float(ar_cpu[3]),
-            "ratio_min": float(ratio_cpu.min()),
-            "ratio_max": float(ratio_cpu.max()),
-            "D_min_nm": float(ratio_cpu.min()) * model.config.period_nm,
-            "D_max_nm": float(ratio_cpu.max()) * model.config.period_nm,
-            "emt_margin_nm": float(emt["margin_nm"]),
         }
 
         append_train_log(train_log_path, row)
-        save_structure_csv(model, current_structure_path)
+        save_structure_csv(model, current_structure_path)  # 结构参数单独存一份
         if settings["save_live_plots"]:
             save_progress_plot(train_log_path, progress_plot_path)
             fig = make_spectra_figure(model)
@@ -644,30 +578,21 @@ def main() -> None:
         if writer is not None:
             write_tensorboard(writer, epoch, row, model)
 
-        torch.save(
-            checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse),
-            last_path,
-        )
+        # 每个评估轮都存一份 last checkpoint（断点续训用）
+        torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse), last_path)
 
-        print(
-            f"epoch {epoch:04d}/{settings['epochs']} | "
-            f"train_mse={row['train_mse']:.6e} | "
-            f"val_mse={row['val_mse']:.6e} | "
-            f"psnr={row['val_psnr']:.2f} | sam={row['val_sam']:.4f} | "
-            f"T0_mean={row['T0_mean']:.4f} T0_min={row['T0_min']:.4f} | "
-            f"tor={row['tor_percent']:.3f}% | grad={row['grad_norm']:.3e}"
-        )
+        print(f"epoch {epoch:04d}/{settings['epochs']} | train_mse={row['train_mse']:.6e} | "
+              f"val_mse={row['val_mse']:.6e} | psnr={row['val_psnr']:.2f} | sam={row['val_sam']:.4f} | "
+              f"T0_mean={row['T0_mean']:.4f} T0_min={row['T0_min']:.4f} | "
+              f"tor={row['tor_percent']:.3f}% coh={row['coherence0']:.4f} | grad={row['grad_norm']:.3e}")
         print_structure_brief(model)
-        print(f"  已更新: {train_log_path}, {current_structure_path}")
 
+        # 只有 val_mse 创新低时，才更新 best checkpoint
         if val_metrics["mse"] < best_val_mse:
             best_val_mse = val_metrics["mse"]
-            torch.save(
-                checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse),
-                best_path,
-            )
+            torch.save(checkpoint_dict(model, optimizer, scheduler, config, wl_nm, settings, epoch, best_val_mse), best_path)
             save_structure_csv(model, results_dir / "ar_emt_best_structure.csv")
-            print(f"  保存 best checkpoint: {best_path}")
+            print(f"  ✔ 新的 best，已保存: {best_path}")
         print()
 
     if writer is not None:

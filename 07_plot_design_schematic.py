@@ -1,4 +1,4 @@
-"""画当前最优 AR-EMT 滤光片结构示意图。
+"""画当前最优 AR-EMT 滤光片结构示意图（看最终设计长什么样）。
 
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 07_plot_design_schematic.py
@@ -6,9 +6,9 @@
 输出:
   results/design_schematic.png
 
-这张图用于看最终结构，不是严格按真实厚度比例绘制。
-原因是 EMT 腔可能几百 nm，而 AR 层几十 nm，按真实比例画会很难看清。
-图中标注的数值是真实训练值。
+这张图分三块：左=纵向层结构，右上=4x4 滤光片柱径分布，下=0 度透过谱。
+注意：图不是按真实厚度比例画的（EMT 腔几百 nm，AR 层几十 nm，按真实比例会看不清），
+     但图上标注的数值都是真实训练值。
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ import torch
 from ar_emt_common import AREMTModel, GeometryConfig, structure_rows
 
 
-# =========================
+# =============================================================================
 # 用户设置区：平时只改这里
-# =========================
+# =============================================================================
 USER_SETTINGS = {
     "checkpoint": "checkpoints/ar_emt_best.pt",
     "output_png": "results/design_schematic.png",
@@ -36,14 +36,14 @@ USER_SETTINGS = {
 
 
 def setup_font() -> None:
-    """设置中文字体。"""
+    """设置中文字体，避免中文变方框。"""
 
     plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
 
 
 def load_model(checkpoint_path: Path) -> AREMTModel:
-    """从 checkpoint 恢复模型。"""
+    """从 checkpoint 恢复模型（放 CPU 上画图就够了）。"""
 
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     config = GeometryConfig(**ckpt["config"])
@@ -55,21 +55,17 @@ def load_model(checkpoint_path: Path) -> AREMTModel:
 
 
 def draw_layer_stack(ax, model: AREMTModel) -> None:
-    """画纵向层结构。
-
-    真实结构：
-        air / SiO2 / TiO2 / residual SU-8 /
-        EMT cavity / TiO2 / SiO2 / fused silica
-    """
+    """画纵向层结构：空气 / SiO2 / TiO2 / 残余SU-8 / EMT腔 / TiO2 / SiO2 / 熔石英。"""
 
     params = model.physical_parameters()
     ar = params["ar_nm"].detach().cpu().numpy()
     h_c = float(params["h_c_nm"].detach().cpu())
     t_r = float(params["t_r_nm"].detach().cpu())
     rows = structure_rows(model)
-    d_mid = rows[len(rows) // 2]["D_nm"]
+    d_mid = rows[len(rows) // 2]["D_nm"]   # 取中间通道的柱径，画 EMT 腔里的柱子示意
     period = model.config.period_nm
 
+    # 从上到下的层（名字, 厚度nm, 颜色）
     layers = [
         ("top L: SiO2", ar[0], "#9ecae1"),
         ("top H: TiO2", ar[1], "#fdae6b"),
@@ -80,52 +76,33 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
     ]
 
     def draw_height(thickness_nm: float) -> float:
-        # 用 sqrt 压缩厚度差异，让薄层也能看见。
+        # 用开平方压缩厚度差异，让几十 nm 的薄层也能看见（纯为可视化，不代表真实比例）
         return max(0.18, np.sqrt(thickness_nm) / 7.0)
 
     x0, width = 0.12, 0.78
     y = 0.0
     y_positions = []
-    for name, thickness, color in reversed(layers):
+    for name, thickness, color in reversed(layers):   # reversed: 从下往上堆
         h = draw_height(float(thickness))
         ax.add_patch(Rectangle((x0, y), width, h, facecolor=color, edgecolor="black", linewidth=0.8))
-        ax.text(
-            x0 + width + 0.04,
-            y + h / 2,
-            f"{name}: {thickness:.2f} nm",
-            va="center",
-            fontsize=9,
-        )
+        ax.text(x0 + width + 0.04, y + h / 2, f"{name}: {thickness:.2f} nm", va="center", fontsize=9)
         y_positions.append((name, y, h))
         y += h
 
+    # 底部基底 + 顶部空气
     ax.add_patch(Rectangle((x0, -0.38), width, 0.38, facecolor="#d9d9d9", edgecolor="black", linewidth=0.8))
     ax.text(x0 + width / 2, -0.19, "fused silica substrate", ha="center", va="center", fontsize=9)
     ax.text(x0 + width / 2, y + 0.18, "air", ha="center", va="center", fontsize=10)
 
+    # 在 EMT 腔里画几根 TiO2 柱子示意
     cavity = [v for v in y_positions if v[0].startswith("EMT cavity")][0]
     _, cy, ch = cavity
     pillar_width = width * (d_mid / period) * 0.22
     for px in [x0 + width * 0.28, x0 + width * 0.50, x0 + width * 0.72]:
-        ax.add_patch(
-            Rectangle(
-                (px - pillar_width / 2, cy),
-                pillar_width,
-                ch,
-                facecolor="#e6550d",
-                edgecolor="#7f2704",
-                linewidth=0.6,
-            )
-        )
-    ax.text(
-        x0 + width / 2,
-        cy + ch / 2,
-        "SU-8 fills gaps\nTiO2 pillars",
-        ha="center",
-        va="center",
-        fontsize=9,
-        color="black",
-    )
+        ax.add_patch(Rectangle((px - pillar_width / 2, cy), pillar_width, ch,
+                               facecolor="#e6550d", edgecolor="#7f2704", linewidth=0.6))
+    ax.text(x0 + width / 2, cy + ch / 2, "SU-8 fills gaps\nTiO2 pillars",
+            ha="center", va="center", fontsize=9, color="black")
 
     ax.set_xlim(0, 1.85)
     ax.set_ylim(-0.45, y + 0.45)
@@ -134,7 +111,7 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
 
 
 def draw_channel_layout(ax, model: AREMTModel) -> None:
-    """画 4x4 滤光片的柱径分布。"""
+    """画 4x4 个滤光片的柱径分布（16 个通道只有 D 不同，圆点越大柱径越大）。"""
 
     rows = structure_rows(model)
     d_values = np.array([r["D_nm"] for r in rows]).reshape(4, 4)
@@ -142,8 +119,7 @@ def draw_channel_layout(ax, model: AREMTModel) -> None:
     period = model.config.period_nm
 
     ax.set_aspect("equal")
-    ax.set_xlim(0, 4)
-    ax.set_ylim(0, 4)
+    ax.set_xlim(0, 4); ax.set_ylim(0, 4)
     ax.invert_yaxis()
     ax.set_title("4x4 filters: only D changes")
 
@@ -151,25 +127,18 @@ def draw_channel_layout(ax, model: AREMTModel) -> None:
         for j in range(4):
             x, y = j, i
             ax.add_patch(Rectangle((x, y), 1, 1, facecolor="#f7f7f7", edgecolor="black", linewidth=0.8))
-            radius = 0.38 * d_values[i, j] / d_values.max()
+            radius = 0.38 * d_values[i, j] / d_values.max()   # 圆点大小按柱径归一化
             ax.add_patch(Circle((x + 0.5, y + 0.42), radius, facecolor="#e6550d", edgecolor="#7f2704"))
             ch = i * 4 + j
-            ax.text(
-                x + 0.5,
-                y + 0.78,
-                f"ch{ch}\nD={d_values[i,j]:.1f} nm\nG={gap_values[i,j]:.1f}",
-                ha="center",
-                va="center",
-                fontsize=8,
-            )
+            ax.text(x + 0.5, y + 0.78, f"ch{ch}\nD={d_values[i,j]:.1f} nm\nG={gap_values[i,j]:.1f}",
+                    ha="center", va="center", fontsize=8)
 
     ax.text(2, 4.25, f"Period P = {period:.1f} nm", ha="center", fontsize=9)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    ax.set_xticks([]); ax.set_yticks([])
 
 
 def draw_spectra(ax, model: AREMTModel) -> None:
-    """画 0 度透过谱。"""
+    """画 0 度透过谱（16 条曲线）。"""
 
     with torch.no_grad():
         t0 = model.transmission(torch.tensor([0.0]))[0].detach().cpu().numpy()
@@ -177,10 +146,8 @@ def draw_spectra(ax, model: AREMTModel) -> None:
 
     for idx in range(t0.shape[0]):
         ax.plot(wl, t0[idx], lw=1.0)
-    ax.set_xlabel("Wavelength (nm)")
-    ax.set_ylabel("Transmission")
-    ax.set_title("0 deg transmission spectra")
-    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("Wavelength (nm)"); ax.set_ylabel("Transmission")
+    ax.set_title("0 deg transmission spectra"); ax.set_ylim(0.0, 1.05)
     ax.grid(True, alpha=0.25)
 
 
@@ -197,7 +164,6 @@ def main() -> None:
 
     fig = plt.figure(figsize=(13, 9))
     gs = fig.add_gridspec(2, 2, height_ratios=[1.05, 1.0], width_ratios=[1.0, 1.2])
-
     ax_stack = fig.add_subplot(gs[0, 0])
     ax_layout = fig.add_subplot(gs[0, 1])
     ax_spec = fig.add_subplot(gs[1, :])

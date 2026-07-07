@@ -1,30 +1,24 @@
-"""用训练好的 AR-EMT 模型重建一张外部高光谱图片/场景。
+"""用训练好的 AR-EMT 模型，重建一张“没参与训练”的外部高光谱图片/场景。
 
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 05_infer_external_image.py
 
-这个脚本解决的问题：
-  训练完成后，你需要把“没参与训练的高光谱图片”输入进来，
-  模拟它经过 16 个滤光片后的测量值，再用保存好的 decoder 重建光谱。
+它解决的问题：
+  训练完之后，你想把一张真实高光谱 cube 输入进来，模拟它经过 16 个滤光片后的
+  测量值，再用保存好的解码器把光谱重建出来，并画图/存结果看效果。
 
 支持的输入：
 1. CAVE 场景目录：里面有 31 张 *_ms_*.png 波段图；
-2. npy 文件：shape 可以是 [H,W,31]、[H,W,151]、[31,H,W]、[151,H,W] 或 [N,151]；
-3. mat 文件：脚本会自动找第一个最后一维是 31 或 151 的数组。
+2. npy 文件：shape 可为 [H,W,31]、[H,W,151]、[31,H,W]、[151,H,W] 或 [N,151]；
+3. mat 文件：自动找第一个“最后一维是 31 或 151”的数组。
 
-不支持普通 RGB 图片直接重建光谱：
-  RGB 只有 3 个通道，信息不够。这里需要高光谱 cube 作为仿真输入。
+不支持普通 RGB 图片：RGB 只有 3 个通道，信息不够；这里需要高光谱 cube 作仿真输入。
 """
 
 from __future__ import annotations
 
 import csv
-import os
 from pathlib import Path
-
-# Windows + conda 下，torch / scipy / numpy 有时会重复加载 OpenMP DLL。
-# 这里让推理脚本继续运行。它只用于离线评估和画图，不影响训练参数。
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import matplotlib
 
@@ -39,41 +33,41 @@ from scipy.io import loadmat
 from ar_emt_common import AREMTModel, GeometryConfig, metric_mse_psnr_sam
 
 
-# =========================
+# =============================================================================
 # 用户设置区：平时只改这里
-# =========================
+# =============================================================================
 USER_SETTINGS = {
-    # 用 best checkpoint 做推理。训练还没结束时也可以改成 checkpoints/ar_emt_last.pt。
+    # 用 best checkpoint 推理。训练没结束时也可临时改成 checkpoints/ar_emt_last.pt。
     "checkpoint": "checkpoints/ar_emt_best.pt",
 
-    # 默认拿一个 CAVE 场景做例子。你可以改成其他 CAVE 场景目录或 npy/mat 文件。
+    # 默认拿一个 CAVE 场景做例子；可改成别的 CAVE 目录或 npy/mat 文件。
     "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms",
 
-    # 输出目录。推理结果单独放这里，避免和训练结果混在一起。
+    # 推理结果单独放这里，别和训练结果混。
     "output_dir": "results_infer",
 
     "device": "cuda",
     "angle_deg": 0.0,
     "batch_size": 4096,
 
-    # 画几条像素光谱用于检查。格式是 (y, x)。
-    # 如果输入是 [N,151] 这种没有图像宽高的数据，就会按样本编号取前几个。
+    # 画几条像素光谱做检查，格式 (y, x)。
+    # 若输入是 [N,151] 这种没有图像宽高的数据，就按样本编号取前几个。
     "plot_pixels": [(80, 80), (180, 260), (320, 320)],
 }
 
 
+# 波长网格：模型用 151 点，CAVE 原始 31 点。
 WL_151 = np.linspace(400.0, 700.0, 151).astype(np.float32)
 WL_31 = np.linspace(400.0, 700.0, 31).astype(np.float32)
 
 
-def image_to_float01(path: Path) -> np.ndarray:
-    """读取一张 PNG，并按位深缩放到 0-1。
+# =============================================================================
+# 读图 / 清理 / 插值（和 02_prepare_data.py 保持一致：绝对强度，不逐条归一化）
+# =============================================================================
 
-    这和 02_prepare_data.py 的处理保持一致：
-    - 8-bit 除以 255；
-    - 16-bit 除以 65535；
-    - 不做逐像素、逐光谱最大值归一化。
-    """
+
+def image_to_float01(path: Path) -> np.ndarray:
+    """读一张 PNG 按位深缩放到 0~1（8-bit/255，16-bit/65535），不做逐像素归一化。"""
 
     arr = np.asarray(Image.open(path))
     if arr.ndim == 3:
@@ -92,7 +86,7 @@ def image_to_float01(path: Path) -> np.ndarray:
 
 
 def clean_cube(cube: np.ndarray) -> np.ndarray:
-    """清理高光谱 cube，但不做逐条归一化。"""
+    """清理高光谱 cube：NaN/inf→0，裁到 0~1，不逐条归一化。"""
 
     cube = np.asarray(cube, dtype=np.float32)
     cube = np.nan_to_num(cube, nan=0.0, posinf=0.0, neginf=0.0)
@@ -101,7 +95,7 @@ def clean_cube(cube: np.ndarray) -> np.ndarray:
 
 
 def interpolate_cube_to_151(cube: np.ndarray) -> np.ndarray:
-    """把最后一维为 31 的 cube 插值成最后一维为 151。"""
+    """把最后一维为 31 的 cube 三次样条插值成 151。"""
 
     cube = clean_cube(cube)
     if cube.shape[-1] == 151:
@@ -117,11 +111,7 @@ def interpolate_cube_to_151(cube: np.ndarray) -> np.ndarray:
 
 
 def move_spectral_axis_to_last(arr: np.ndarray) -> np.ndarray:
-    """把光谱维放到最后。
-
-    有些 npy 可能是 [31,H,W] 或 [151,H,W]，
-    训练代码需要 [H,W,31] 或 [H,W,151]。
-    """
+    """把光谱维挪到最后。有些 npy 是 [31,H,W]/[151,H,W]，我们要 [H,W,31]/[H,W,151]。"""
 
     arr = np.asarray(arr)
     if arr.ndim == 3 and arr.shape[-1] in {31, 151}:
@@ -133,45 +123,17 @@ def move_spectral_axis_to_last(arr: np.ndarray) -> np.ndarray:
     raise ValueError(f"不认识的高光谱数据 shape={arr.shape}")
 
 
-def find_cave_band_pngs(scene_dir: Path) -> list[Path]:
-    """在一个 CAVE 场景目录里寻找 31 张波段 PNG。
-
-    CAVE 解压后常见两种结构：
-    1. extracted/balloons_ms/balloons_ms_01.png
-    2. extracted/balloons_ms/balloons_ms/balloons_ms_01.png
-
-    所以这里先找当前目录；找不到就递归到子目录里找。
-    """
-
-    direct_pngs = sorted(scene_dir.glob("*_ms_*.png"))
-    if len(direct_pngs) >= 31:
-        return direct_pngs[:31]
-
-    candidate_dirs = []
-    for path in scene_dir.rglob("*"):
-        if not path.is_dir():
-            continue
-        pngs = sorted(path.glob("*_ms_*.png"))
-        if len(pngs) >= 31:
-            candidate_dirs.append((path, pngs[:31]))
-
-    if not candidate_dirs:
-        return []
-
-    # 如果有多个候选，选路径最短的那个，一般就是实际场景目录。
-    candidate_dirs.sort(key=lambda item: len(str(item[0])))
-    return candidate_dirs[0][1]
+# =============================================================================
+# 按输入类型读取
+# =============================================================================
 
 
 def load_cave_scene(scene_dir: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
-    """读取 CAVE 场景目录，返回 [H,W,151]。"""
+    """读 CAVE 场景目录，返回 [H,W,151]。"""
 
-    pngs = find_cave_band_pngs(scene_dir)
+    pngs = sorted(scene_dir.glob("*_ms_*.png"))[:31]
     if len(pngs) != 31:
-        raise ValueError(
-            f"{scene_dir} 中没有找到 31 张 *_ms_*.png 波段图。"
-            "如果这是普通 RGB 图片目录，它不能直接用于高光谱重建。"
-        )
+        raise ValueError(f"{scene_dir} 中没有找到 31 张 *_ms_*.png 波段图。")
 
     bands = [image_to_float01(path) for path in pngs]
     cube31 = np.stack(bands, axis=-1)
@@ -181,8 +143,6 @@ def load_cave_scene(scene_dir: Path) -> tuple[np.ndarray, tuple[int, int] | None
 
 
 def load_npy(path: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
-    """读取 npy 高光谱数据。"""
-
     arr = move_spectral_axis_to_last(np.load(path))
     cube = interpolate_cube_to_151(arr)
     image_shape = tuple(cube.shape[:2]) if cube.ndim == 3 else None
@@ -190,8 +150,6 @@ def load_npy(path: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
 
 
 def load_mat(path: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
-    """读取 mat 高光谱数据。"""
-
     data = loadmat(path)
     for key, arr in data.items():
         if key.startswith("__") or not isinstance(arr, np.ndarray):
@@ -207,7 +165,7 @@ def load_mat(path: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
 
 
 def load_input_cube(input_path: Path) -> tuple[np.ndarray, tuple[int, int] | None, str]:
-    """根据路径类型读取外部输入。"""
+    """根据路径类型分派到对应的读取函数。"""
 
     if input_path.is_dir():
         return load_cave_scene(input_path)
@@ -215,22 +173,11 @@ def load_input_cube(input_path: Path) -> tuple[np.ndarray, tuple[int, int] | Non
         return load_npy(input_path)
     if input_path.suffix.lower() == ".mat":
         return load_mat(input_path)
-    raise ValueError(
-        "当前脚本需要 CAVE 场景目录、npy 或 mat 高光谱数据。"
-        "普通 RGB 图片不能直接用于这个光谱重建仿真。"
-    )
+    raise ValueError("需要 CAVE 场景目录、npy 或 mat 高光谱数据；普通 RGB 图片不能用于此仿真。")
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> AREMTModel:
-    """读取训练保存的完整模型。
-
-    checkpoint 里保存了：
-    - 光学编码器结构参数；
-    - decoder 的 Linear 层权重；
-    - 训练用的 optimizer/scheduler 状态。
-
-    推理只需要前两者。
-    """
+    """读取训练保存的完整模型；推理只需要“结构参数 + 解码器权重”。"""
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = GeometryConfig(**ckpt["config"])
@@ -243,26 +190,15 @@ def load_model(checkpoint_path: Path, device: torch.device) -> AREMTModel:
     return model
 
 
-def run_inference(
-    model: AREMTModel,
-    spectra: np.ndarray,
-    angle_deg: float,
-    batch_size: int,
-    device: torch.device,
-) -> tuple[np.ndarray, np.ndarray]:
-    """批量推理。
+def run_inference(model: AREMTModel, spectra: np.ndarray, angle_deg: float,
+                  batch_size: int, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
+    """批量推理。输入 [N,151]；输出 重建 [N,151] 和 16 通道测量 [N,16]。
 
-    输入 spectra:
-        [N,151]
-    输出：
-        pred_all: [N,151]，重建光谱；
-        meas_all: [N,16]，16 个滤光片测量值。
+    这里不加噪声（模拟“理想读数下”的重建效果）；想看抗噪表现请用 04 的噪声鲁棒性评估。
     """
 
     spectra_tensor = torch.from_numpy(spectra.astype(np.float32))
-    pred_chunks = []
-    meas_chunks = []
-
+    pred_chunks, meas_chunks = [], []
     with torch.no_grad():
         t = model.transmission(torch.tensor([angle_deg], device=device))[0]
         for start in range(0, spectra_tensor.shape[0], batch_size):
@@ -271,13 +207,10 @@ def run_inference(
             pred = model.decoder(meas)
             pred_chunks.append(pred.cpu().numpy().astype(np.float32))
             meas_chunks.append(meas.cpu().numpy().astype(np.float32))
-
-    pred_all = np.concatenate(pred_chunks, axis=0)
-    meas_all = np.concatenate(meas_chunks, axis=0)
-    return pred_all, meas_all
+    return np.concatenate(pred_chunks, axis=0), np.concatenate(meas_chunks, axis=0)
 
 
-def save_summary_csv(summary: dict[str, float | int | str], path: Path) -> None:
+def save_summary_csv(summary: dict, path: Path) -> None:
     """保存一行推理摘要。"""
 
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -286,93 +219,56 @@ def save_summary_csv(summary: dict[str, float | int | str], path: Path) -> None:
         writer.writerow(summary)
 
 
-def plot_selected_spectra(
-    gt_flat: np.ndarray,
-    pred_flat: np.ndarray,
-    image_shape: tuple[int, int] | None,
-    plot_pixels: list[tuple[int, int]],
-    out_path: Path,
-) -> None:
-    """画几个像素位置的真实光谱和重建光谱。
+# =============================================================================
+# 画图
+# =============================================================================
 
-    同一个像素使用同一种颜色：
-    - 实线是真实光谱；
-    - 虚线是重建光谱。
 
-    这样比自动换颜色更容易判断某个像素到底准不准。
-    """
+def plot_selected_spectra(gt_flat, pred_flat, image_shape, plot_pixels, out_path: Path) -> None:
+    """画几个像素位置的真实光谱(实线)和重建光谱(虚线)对比。"""
 
     plt.figure(figsize=(9, 5))
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     if image_shape is None:
-        sample_ids = list(range(min(3, gt_flat.shape[0])))
-        for k, idx in enumerate(sample_ids):
-            color = colors[k % len(colors)]
-            mse = float(np.mean((pred_flat[idx] - gt_flat[idx]) ** 2))
-            sam = spectral_angle(gt_flat[idx], pred_flat[idx])
-            label = f"sample {idx}, MSE={mse:.2e}, SAM={sam:.3f}"
-            plt.plot(WL_151, gt_flat[idx], lw=1.8, color=color, label=f"gt {label}")
-            plt.plot(WL_151, pred_flat[idx], lw=1.3, ls="--", color=color, label=f"pred {label}")
+        for idx in range(min(3, gt_flat.shape[0])):
+            plt.plot(WL_151, gt_flat[idx], lw=1.8, label=f"gt sample {idx}")
+            plt.plot(WL_151, pred_flat[idx], lw=1.2, ls="--", label=f"pred sample {idx}")
     else:
         h, w = image_shape
-        for k, (y, x) in enumerate(plot_pixels):
+        for y, x in plot_pixels:
             yy = int(np.clip(y, 0, h - 1))
             xx = int(np.clip(x, 0, w - 1))
             idx = yy * w + xx
-            color = colors[k % len(colors)]
-            mse = float(np.mean((pred_flat[idx] - gt_flat[idx]) ** 2))
-            sam = spectral_angle(gt_flat[idx], pred_flat[idx])
-            label = f"({yy},{xx}), MSE={mse:.2e}, SAM={sam:.3f}"
-            plt.plot(WL_151, gt_flat[idx], lw=1.8, color=color, label=f"gt {label}")
-            plt.plot(WL_151, pred_flat[idx], lw=1.3, ls="--", color=color, label=f"pred {label}")
+            plt.plot(WL_151, gt_flat[idx], lw=1.8, label=f"gt ({yy},{xx})")
+            plt.plot(WL_151, pred_flat[idx], lw=1.2, ls="--", label=f"pred ({yy},{xx})")
 
-    plt.xlabel("Wavelength (nm)")
-    plt.ylabel("Intensity")
-    plt.title("Selected pixel spectra")
-    plt.legend(fontsize=8)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=180)
-    plt.close()
+    plt.xlabel("Wavelength (nm)"); plt.ylabel("Intensity")
+    plt.title("Selected pixel spectra"); plt.legend(fontsize=8)
+    plt.tight_layout(); plt.savefig(out_path, dpi=180); plt.close()
 
 
-def spectral_angle(gt: np.ndarray, pred: np.ndarray) -> float:
-    """计算单条光谱的 SAM，单位是弧度。"""
-
-    denom = np.linalg.norm(gt) * np.linalg.norm(pred) + 1e-12
-    cos_val = np.clip(float(np.dot(gt, pred) / denom), -1.0, 1.0)
-    return float(np.arccos(cos_val))
-
-
-def plot_error_map(gt_flat: np.ndarray, pred_flat: np.ndarray, image_shape: tuple[int, int], out_path: Path) -> None:
-    """画每个像素的光谱 MSE 误差图。"""
+def plot_error_map(gt_flat, pred_flat, image_shape, out_path: Path) -> None:
+    """画每个像素的光谱重建 MSE 误差图（越亮误差越大）。"""
 
     h, w = image_shape
     mse = np.mean((pred_flat - gt_flat) ** 2, axis=1).reshape(h, w)
     plt.figure(figsize=(6, 5))
-    plt.imshow(mse, cmap="magma")
-    plt.colorbar(label="MSE")
-    plt.title("Per-pixel reconstruction MSE")
-    plt.axis("off")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=180)
-    plt.close()
+    plt.imshow(mse, cmap="magma"); plt.colorbar(label="MSE")
+    plt.title("Per-pixel reconstruction MSE"); plt.axis("off")
+    plt.tight_layout(); plt.savefig(out_path, dpi=180); plt.close()
 
 
-def plot_measurement_preview(meas_flat: np.ndarray, image_shape: tuple[int, int], out_path: Path) -> None:
-    """画 16 个滤光片测量图。"""
+def plot_measurement_preview(meas_flat, image_shape, out_path: Path) -> None:
+    """画 16 个滤光片各自的测量图（相当于 16 张“伪彩通道图”）。"""
 
     h, w = image_shape
     meas = meas_flat.reshape(h, w, 16)
     fig, axes = plt.subplots(4, 4, figsize=(8, 8))
     for ch, ax in enumerate(axes.ravel()):
         im = ax.imshow(meas[:, :, ch], cmap="viridis")
-        ax.set_title(f"ch{ch}", fontsize=9)
-        ax.axis("off")
+        ax.set_title(f"ch{ch}", fontsize=9); ax.axis("off")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
     fig.suptitle("Simulated 16-channel measurements", fontsize=12)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=160)
-    plt.close(fig)
+    fig.tight_layout(); fig.savefig(out_path, dpi=160); plt.close(fig)
 
 
 def main() -> None:
@@ -384,6 +280,7 @@ def main() -> None:
     model = load_model(Path(settings["checkpoint"]), device)
     cube, image_shape, source_desc = load_input_cube(Path(settings["input_path"]))
 
+    # 把 cube 拍平成 [N,151] 送进模型
     if cube.ndim == 3:
         h, w, n_wl = cube.shape
         spectra_flat = cube.reshape(h * w, n_wl)
@@ -398,35 +295,27 @@ def main() -> None:
     print(f"  min={spectra_flat.min():.6f}, max={spectra_flat.max():.6f}, mean={spectra_flat.mean():.6f}")
 
     pred_flat, meas_flat = run_inference(
-        model=model,
-        spectra=spectra_flat,
-        angle_deg=float(settings["angle_deg"]),
-        batch_size=int(settings["batch_size"]),
-        device=device,
+        model=model, spectra=spectra_flat, angle_deg=float(settings["angle_deg"]),
+        batch_size=int(settings["batch_size"]), device=device,
     )
 
+    # 有真值(输入本身)就算个整体指标
     metrics = metric_mse_psnr_sam(torch.from_numpy(pred_flat), torch.from_numpy(spectra_flat))
     summary = {
-        "source": source_desc,
-        "checkpoint": settings["checkpoint"],
-        "angle_deg": settings["angle_deg"],
+        "source": source_desc, "checkpoint": settings["checkpoint"], "angle_deg": settings["angle_deg"],
         "n_spectra": spectra_flat.shape[0],
-        "mse": metrics["mse"],
-        "psnr": metrics["psnr"],
-        "sam": metrics["sam"],
-        "input_min": float(spectra_flat.min()),
-        "input_max": float(spectra_flat.max()),
-        "input_mean": float(spectra_flat.mean()),
-        "pred_min": float(pred_flat.min()),
-        "pred_max": float(pred_flat.max()),
-        "pred_mean": float(pred_flat.mean()),
+        "mse": metrics["mse"], "psnr": metrics["psnr"], "sam": metrics["sam"],
+        "input_min": float(spectra_flat.min()), "input_max": float(spectra_flat.max()), "input_mean": float(spectra_flat.mean()),
+        "pred_min": float(pred_flat.min()), "pred_max": float(pred_flat.max()), "pred_mean": float(pred_flat.mean()),
     }
     save_summary_csv(summary, output_dir / "inference_summary.csv")
 
+    # 存原始数组，方便你后续自己分析
     np.save(output_dir / "input_spectra_151.npy", spectra_flat.astype(np.float32))
     np.save(output_dir / "measurement_16ch.npy", meas_flat.astype(np.float32))
     np.save(output_dir / "reconstructed_spectra_151.npy", pred_flat.astype(np.float32))
 
+    # 有图像宽高时，额外存成 cube 并画误差图/测量图
     if image_shape is not None:
         h, w = image_shape
         np.save(output_dir / "input_cube_151.npy", spectra_flat.reshape(h, w, 151).astype(np.float32))
@@ -435,19 +324,14 @@ def main() -> None:
         plot_error_map(spectra_flat, pred_flat, image_shape, output_dir / "reconstruction_error_map.png")
         plot_measurement_preview(meas_flat, image_shape, output_dir / "measurement_channels_preview.png")
 
-    plot_selected_spectra(
-        gt_flat=spectra_flat,
-        pred_flat=pred_flat,
-        image_shape=image_shape,
-        plot_pixels=settings["plot_pixels"],
-        out_path=output_dir / "selected_pixel_spectra.png",
-    )
+    plot_selected_spectra(spectra_flat, pred_flat, image_shape, settings["plot_pixels"],
+                          output_dir / "selected_pixel_spectra.png")
 
     print()
     print("推理完成")
     print(f"  mse={metrics['mse']:.6e}, psnr={metrics['psnr']:.2f}, sam={metrics['sam']:.4f}")
     print(f"  结果已保存到: {output_dir}")
-    print("  重点查看:")
+    print("  重点看:")
     print(f"    {output_dir / 'selected_pixel_spectra.png'}")
     if image_shape is not None:
         print(f"    {output_dir / 'reconstruction_error_map.png'}")

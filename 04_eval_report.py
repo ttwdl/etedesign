@@ -1,16 +1,18 @@
-"""评估训练好的 AR-EMT checkpoint。
+"""评估训练好的 AR-EMT checkpoint（最终结果汇报用）。
 
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 04_eval_report.py
 
-这个脚本只做最终评估：
-  - 读取 checkpoints/ar_emt_best.pt；
-  - 读取 test_spectra.npy；
-  - 输出角度表、制造误差、结构参数和透过谱图。
+它会读取 checkpoints/ar_emt_best.pt 和 test_spectra.npy，然后输出：
+  - 不同入射角下的重建精度表（eval_angles.csv）；
+  - 结构参数表（eval_structure.csv）；
+  - 制造误差 Monte Carlo（eval_fabrication_mc.csv）；
+  - 测量噪声鲁棒性（eval_noise_robustness.csv）；
+  - 透过谱图。
 
-注意：
-  训练时保存 best 用的是 val_mse。
-  这里的 test 集没有参与训练和选 best，更适合当最终结果汇报。
+为什么用 test 集：
+  训练时选 best 看的是 val_mse；test 集没参与训练、也没参与选 best，
+  所以用它当“最终、诚实”的成绩最合适。
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import torch
 from ar_emt_common import (
     AREMTModel,
     GeometryConfig,
+    add_measurement_noise,
     evaluate_fixed_angle,
     geometry_report,
     metric_mse_psnr_sam,
@@ -36,30 +39,33 @@ from ar_emt_common import (
 )
 
 
-# =========================
+# =============================================================================
 # 用户设置区：平时只改这里
-# =========================
+# =============================================================================
 USER_SETTINGS = {
     "checkpoint": "checkpoints/ar_emt_best.pt",
     "data_dir": r"E:\hyperspectral_datasets\CAVE\data_cache_absolute_100k",
     "output_dir": "results",
     "device": "cuda",
 
-    # 0 表示用 test_spectra.npy 全部数据。
-    "test_size": 0,
+    "test_size": 0,   # 0 表示用 test_spectra.npy 的全部数据
 
-    # 要评估的入射角，单位是度。
+    # 要评估的入射角(度)
     "angles_deg": [0.0, 0.5, 2.0, 5.0, 8.0, 10.0],
 
-    # 制造误差 Monte Carlo 次数。想快一点可以改成 5，正式汇报可以改成 50。
+    # 制造误差 Monte Carlo 次数。想快点改 5，正式汇报改 50。
     "mc": 20,
+
+    # 测量噪声鲁棒性：分别在这些“相对噪声”水平下评估重建(0=无噪声做基准)。
+    "noise_eval_levels": [0.0, 0.01, 0.02, 0.05],
+
     "seed": 2026,
     "batch_size": 4096,
 }
 
 
-def save_csv(rows: list[dict[str, float | int | str]], path: Path) -> None:
-    """保存 CSV 表格。"""
+def save_csv(rows: list[dict], path: Path) -> None:
+    """保存 CSV。"""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -71,7 +77,7 @@ def save_csv(rows: list[dict[str, float | int | str]], path: Path) -> None:
 
 
 def load_test_data(data_dir: Path, test_size: int) -> torch.Tensor:
-    """读取测试集。"""
+    """读取 test 集。"""
 
     path = data_dir / "test_spectra.npy"
     if not path.exists():
@@ -85,7 +91,7 @@ def load_test_data(data_dir: Path, test_size: int) -> torch.Tensor:
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[AREMTModel, dict]:
-    """读取 checkpoint 并恢复模型。"""
+    """读取 checkpoint 并恢复模型（结构参数 + 解码器权重）。"""
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"找不到 checkpoint: {checkpoint_path}")
@@ -114,22 +120,18 @@ def evaluate_with_overrides(
     ar: torch.Tensor,
     batch_size: int,
 ) -> dict[str, float]:
-    """用指定结构参数评估。
+    """用“临时指定的结构参数”评估（供制造误差 MC 用）。
 
-    制造误差 MC 会扰动结构参数，但 decoder 权重不变。
+    注意：这里只扰动物理结构参数（模拟加工误差），解码器权重不变。
     """
 
     device = next(model.parameters()).device
-    preds = []
-    targets = []
+    preds, targets = [], []
     model.eval()
     with torch.no_grad():
         t = model.transmission(
             torch.tensor([angle_deg], device=device),
-            ratio_override=ratio,
-            h_c_override=h_c,
-            t_r_override=t_r,
-            ar_override=ar,
+            ratio_override=ratio, h_c_override=h_c, t_r_override=t_r, ar_override=ar,
         )[0]
         for start in range(0, spectra.shape[0], batch_size):
             batch = spectra[start:start + batch_size].to(device)
@@ -141,15 +143,13 @@ def evaluate_with_overrides(
 
 
 def run_mc_fabrication(model: AREMTModel, spectra: torch.Tensor, n_mc: int, seed: int, batch_size: int) -> dict[str, float]:
-    """制造误差 Monte Carlo。
+    """制造误差 Monte Carlo：随机扰动结构参数很多次，看重建平均掉多少。
 
-    当前扰动设置：
-    - D: ±3 nm；
-    - h_c: ±2 nm；
-    - t_r: ±5 nm；
-    - AR 四层: ±2 nm。
-
-    这些数值只是第一版工艺误差假设，以后可以按真实工艺能力修改。
+    当前扰动幅度（第一版工艺误差假设，以后按真实工艺能力改）：
+    - D    : ±3 nm
+    - h_c  : ±2 nm
+    - t_r  : ±5 nm
+    - AR 4层: ±2 nm
     """
 
     if n_mc <= 0:
@@ -168,6 +168,7 @@ def run_mc_fabrication(model: AREMTModel, spectra: torch.Tensor, n_mc: int, seed
 
     rows = []
     for _ in range(n_mc):
+        # D 的 ±3nm 扰动换算成 D/P 的扰动(除以周期)
         d_delta = (torch.rand(base_ratio.shape, generator=gen, device=device) * 6.0 - 3.0) / period
         ratio = torch.clamp(base_ratio + d_delta, model.r_min, model.r_max)
         h_c = torch.clamp(base_hc + (torch.rand((), generator=gen, device=device) * 4.0 - 2.0), *model.h_c_range)
@@ -182,8 +183,36 @@ def run_mc_fabrication(model: AREMTModel, spectra: torch.Tensor, n_mc: int, seed
     }
 
 
+def run_noise_robustness(model: AREMTModel, spectra: torch.Tensor, levels: list[float],
+                         seed: int, batch_size: int) -> list[dict[str, float]]:
+    """测量噪声鲁棒性：在几个“相对噪声”水平下评估重建(0=无噪声基准)。
+
+    因为训练时加了噪声，这里应看到即使噪声升高，重建也不会立刻崩，
+    说明模型学到的是“抗噪的还原”，而不是死记硬背干净测量。
+    """
+
+    device = next(model.parameters()).device
+    torch.manual_seed(seed)
+    rows = []
+    with torch.no_grad():
+        t = model.transmission(torch.tensor([0.0], device=device))[0]
+        for rel in levels:
+            preds, targets = [], []
+            for start in range(0, spectra.shape[0], batch_size):
+                batch = spectra[start:start + batch_size].to(device)
+                meas = model.measure(batch, t)
+                meas = add_measurement_noise(meas, rel_sigma=rel, abs_sigma=0.0)  # 测试时加噪
+                pred = model.decoder(meas)
+                preds.append(pred.cpu())
+                targets.append(batch.cpu())
+            m = metric_mse_psnr_sam(torch.cat(preds, 0), torch.cat(targets, 0))
+            rows.append({"noise_rel": rel, **m})
+            print(f"  noise_rel={rel:5.3f} | mse={m['mse']:.6e} | psnr={m['psnr']:.2f} | sam={m['sam']:.4f}")
+    return rows
+
+
 def plot_spectra(model: AREMTModel, output_dir: Path) -> None:
-    """保存透过谱图。"""
+    """存两张透过谱图：0 度单独一张；0 度实线 + 5 度虚线叠一张。"""
 
     device = next(model.parameters()).device
     wl = model.wl_nm.detach().cpu().numpy()
@@ -194,25 +223,17 @@ def plot_spectra(model: AREMTModel, output_dir: Path) -> None:
     plt.figure(figsize=(9, 5))
     for idx in range(t0.shape[0]):
         plt.plot(wl, t0[idx], lw=1.0)
-    plt.xlabel("Wavelength (nm)")
-    plt.ylabel("Transmission")
-    plt.title("AR-EMT spectra, alpha=0 deg")
-    plt.ylim(0.0, 1.05)
-    plt.tight_layout()
-    plt.savefig(output_dir / "eval_spectra_0deg.png", dpi=180)
-    plt.close()
+    plt.xlabel("Wavelength (nm)"); plt.ylabel("Transmission")
+    plt.title("AR-EMT spectra, alpha=0 deg"); plt.ylim(0.0, 1.05)
+    plt.tight_layout(); plt.savefig(output_dir / "eval_spectra_0deg.png", dpi=180); plt.close()
 
     plt.figure(figsize=(9, 5))
     for idx in range(t0.shape[0]):
         plt.plot(wl, t0[idx], lw=1.0, alpha=0.9)
         plt.plot(wl, t5[idx], lw=0.8, alpha=0.45, ls="--")
-    plt.xlabel("Wavelength (nm)")
-    plt.ylabel("Transmission")
-    plt.title("AR-EMT spectra, solid=0 deg, dashed=5 deg")
-    plt.ylim(0.0, 1.05)
-    plt.tight_layout()
-    plt.savefig(output_dir / "eval_spectra_0deg_5deg.png", dpi=180)
-    plt.close()
+    plt.xlabel("Wavelength (nm)"); plt.ylabel("Transmission")
+    plt.title("AR-EMT spectra, solid=0 deg, dashed=5 deg"); plt.ylim(0.0, 1.05)
+    plt.tight_layout(); plt.savefig(output_dir / "eval_spectra_0deg_5deg.png", dpi=180); plt.close()
 
 
 def main() -> None:
@@ -224,6 +245,7 @@ def main() -> None:
     model, _ckpt = load_model(Path(settings["checkpoint"]), device)
     test = load_test_data(Path(settings["data_dir"]), settings["test_size"])
 
+    # ---- 角度表：不同入射角下的重建精度 + 透过率 ----
     angle_rows = []
     for angle in settings["angles_deg"]:
         metrics = evaluate_fixed_angle(model, test, angle_deg=angle, batch_size=settings["batch_size"])
@@ -231,38 +253,35 @@ def main() -> None:
             t = model.transmission(torch.tensor([angle], device=device))[0]
             row = {
                 "angle_deg": angle,
-                "mse": metrics["mse"],
-                "psnr": metrics["psnr"],
-                "sam": metrics["sam"],
-                "T_mean": float(t.mean().cpu()),
-                "T_min": float(t.min().cpu()),
+                "mse": metrics["mse"], "psnr": metrics["psnr"], "sam": metrics["sam"],
+                "T_mean": float(t.mean().cpu()), "T_min": float(t.min().cpu()),
                 "T_peak_median": float(torch.median(t.max(dim=1).values).cpu()),
                 "tor_percent": tor_percent(t),
             }
         angle_rows.append(row)
-        print(
-            f"angle={angle:4.1f} deg | mse={row['mse']:.6e} | psnr={row['psnr']:.2f} | "
-            f"sam={row['sam']:.4f} | T_mean={row['T_mean']:.4f} | tor={row['tor_percent']:.3f}%"
-        )
+        print(f"angle={angle:4.1f} deg | mse={row['mse']:.6e} | psnr={row['psnr']:.2f} | "
+              f"sam={row['sam']:.4f} | T_mean={row['T_mean']:.4f} | tor={row['tor_percent']:.3f}%")
 
     save_csv(angle_rows, output_dir / "eval_angles.csv")
     save_csv(structure_rows(model), output_dir / "eval_structure.csv")
     plot_spectra(model, output_dir)
 
-    mc_metrics = run_mc_fabrication(
-        model,
-        test,
-        n_mc=settings["mc"],
-        seed=settings["seed"] + 100,
-        batch_size=settings["batch_size"],
-    )
+    # ---- 制造误差 MC ----
+    print()
+    print(f"制造误差 Monte Carlo (mc={settings['mc']})：")
+    mc_metrics = run_mc_fabrication(model, test, n_mc=settings["mc"], seed=settings["seed"] + 100,
+                                    batch_size=settings["batch_size"])
     save_csv([{"mc_count": settings["mc"], **mc_metrics}], output_dir / "eval_fabrication_mc.csv")
+    print(f"  平均 | mse={mc_metrics['mse']:.6e} | psnr={mc_metrics['psnr']:.2f} | sam={mc_metrics['sam']:.4f}")
+
+    # ---- 测量噪声鲁棒性 ----
+    print()
+    print("测量噪声鲁棒性：")
+    noise_rows = run_noise_robustness(model, test, settings["noise_eval_levels"],
+                                      seed=settings["seed"] + 200, batch_size=settings["batch_size"])
+    save_csv(noise_rows, output_dir / "eval_noise_robustness.csv")
 
     print()
-    print(
-        f"制造扰动 MC({settings['mc']}) | mse={mc_metrics['mse']:.6e} | "
-        f"psnr={mc_metrics['psnr']:.2f} | sam={mc_metrics['sam']:.4f}"
-    )
     print(f"评估结果已保存到: {output_dir}")
 
 

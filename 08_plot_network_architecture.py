@@ -1,4 +1,4 @@
-"""画 AR-EMT 端到端训练网络结构图。
+"""画 AR-EMT 端到端训练网络结构图（给 PPT 用）。
 
 直接运行:
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 08_plot_network_architecture.py
@@ -7,12 +7,14 @@
   results/network_architecture_ppt.png
   results/network_architecture_ppt.svg
 
-这张图用于 PPT 展示，重点说明：
-1. 输入是一条光谱，不是图像 patch；
-2. 光学编码器是可训练物理结构 + 可微 TMM；
-3. 16 个滤光片把 151 维光谱压缩成 16 维测量；
-4. MLP 解码器把 16 维测量重建回 151 维光谱；
-5. loss 只用 MSE 和透过率约束，tor 只记录不参与 loss。
+这张图想讲清 5 件事：
+1. 输入是“一条光谱”，不是图像 patch；
+2. 光学编码器 = 可训练物理结构 + 可微 TMM；
+3. 16 个滤光片把 151 维光谱压成 16 维测量（训练时还会加噪声）；
+4. MLP 解码器（16→512→256→151，输出经 Softplus 保证非负）把测量重建回光谱；
+5. loss = MSE + 光谱角 + 吞吐量约束 + 通道去相关（后三项都可单独开关）。
+
+注意：这张图纯手绘示意，改了模型结构记得也来这里同步文字，别让图“说谎”。
 """
 
 from __future__ import annotations
@@ -26,9 +28,9 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
-# =========================
+# =============================================================================
 # 用户设置区：平时只改这里
-# =========================
+# =============================================================================
 USER_SETTINGS = {
     "output_dir": "results",
     "output_stem": "network_architecture_ppt",
@@ -36,58 +38,33 @@ USER_SETTINGS = {
 
 
 def setup_font() -> None:
-    """设置中文字体。"""
+    """设置中文字体，避免中文变成方框。"""
 
     plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
 
 
-def add_box(
-    ax,
-    xy: tuple[float, float],
-    size: tuple[float, float],
-    title: str,
-    body: str,
-    facecolor: str,
-    title_size: int = 13,
-    body_size: int = 10,
-) -> None:
-    """画一个说明框。"""
+def add_box(ax, xy, size, title, body, facecolor, title_size=13, body_size=10) -> None:
+    """画一个圆角说明框：上面粗体标题，下面正文。"""
 
     x, y = xy
     w, h = size
     patch = FancyBboxPatch(
-        (x, y),
-        w,
-        h,
+        (x, y), w, h,
         boxstyle="round,pad=0.015,rounding_size=0.025",
-        linewidth=1.4,
-        edgecolor="#2b2b2b",
-        facecolor=facecolor,
+        linewidth=1.4, edgecolor="#2b2b2b", facecolor=facecolor,
     )
     ax.add_patch(patch)
     ax.text(x + w / 2, y + h - 0.12, title, ha="center", va="top", fontsize=title_size, weight="bold")
     ax.text(x + 0.08, y + h - 0.34, body, ha="left", va="top", fontsize=body_size, linespacing=1.35)
 
 
-def add_arrow(
-    ax,
-    start: tuple[float, float],
-    end: tuple[float, float],
-    text: str | None = None,
-    curve: float = 0.0,
-    color: str = "#333333",
-    dashed: bool = False,
-) -> None:
-    """画流程箭头。"""
+def add_arrow(ax, start, end, text=None, curve=0.0, color="#333333", dashed=False) -> None:
+    """画一支流程箭头，可带文字标注。dashed=True 用于表示“反向传播”。"""
 
     arrow = FancyArrowPatch(
-        start,
-        end,
-        arrowstyle="-|>",
-        mutation_scale=18,
-        linewidth=1.7,
-        color=color,
+        start, end,
+        arrowstyle="-|>", mutation_scale=18, linewidth=1.7, color=color,
         linestyle="--" if dashed else "-",
         connectionstyle=f"arc3,rad={curve}",
     )
@@ -95,45 +72,38 @@ def add_arrow(
     if text:
         mx = (start[0] + end[0]) / 2
         my = (start[1] + end[1]) / 2
-        ax.text(
-            mx,
-            my + 0.08,
-            text,
-            ha="center",
-            va="bottom",
-            fontsize=10,
-            color=color,
-            bbox=dict(facecolor="white", edgecolor="none", pad=1.5),
-        )
+        ax.text(mx, my + 0.08, text, ha="center", va="bottom", fontsize=10, color=color,
+                bbox=dict(facecolor="white", edgecolor="none", pad=1.5))
 
 
 def draw_decoder_nodes(ax) -> None:
-    """在 MLP 框里画 16->500->151 的全连接示意。"""
+    """在解码器框里画 16 → 512 → 256 → 151 的四层全连接示意（只是示意，圆点数量不代表真实维度）。"""
 
-    x_cols = [9.20, 9.80, 10.40]
+    x_cols = [9.15, 9.70, 10.25, 10.80]          # 四列的横坐标
     y_nodes = {
-        "in": [3.78, 3.62, 3.46, 3.30],
-        "hid": [3.84, 3.68, 3.52, 3.36, 3.20],
-        "out": [3.78, 3.62, 3.46, 3.30],
+        "in":  [3.78, 3.62, 3.46, 3.30],          # 16
+        "h1":  [3.84, 3.68, 3.52, 3.36, 3.20],    # 512
+        "h2":  [3.84, 3.68, 3.52, 3.36, 3.20],    # 256
+        "out": [3.78, 3.62, 3.46, 3.30],          # 151
     }
+    colors = ["#7fb3d5", "#f7dc6f", "#f5b041", "#82e0aa"]
+    edges = ["#1b4f72", "#7d6608", "#7e5109", "#145a32"]
+    keys = ["in", "h1", "h2", "out"]
 
-    for y0 in y_nodes["in"]:
-        ax.scatter(x_cols[0], y0, s=65, color="#7fb3d5", edgecolor="#1b4f72", zorder=5)
-    for y0 in y_nodes["hid"]:
-        ax.scatter(x_cols[1], y0, s=65, color="#f7dc6f", edgecolor="#7d6608", zorder=5)
-    for y0 in y_nodes["out"]:
-        ax.scatter(x_cols[2], y0, s=65, color="#82e0aa", edgecolor="#145a32", zorder=5)
+    # 画圆点
+    for xi, key, col, ec in zip(x_cols, keys, colors, edges):
+        for y0 in y_nodes[key]:
+            ax.scatter(xi, y0, s=60, color=col, edgecolor=ec, zorder=5)
 
-    for ya in y_nodes["in"]:
-        for yb in y_nodes["hid"]:
-            ax.plot([x_cols[0], x_cols[1]], [ya, yb], color="#888888", linewidth=0.45, alpha=0.55)
-    for ya in y_nodes["hid"]:
-        for yb in y_nodes["out"]:
-            ax.plot([x_cols[1], x_cols[2]], [ya, yb], color="#888888", linewidth=0.45, alpha=0.55)
+    # 相邻两列之间连线
+    for a in range(3):
+        for ya in y_nodes[keys[a]]:
+            for yb in y_nodes[keys[a + 1]]:
+                ax.plot([x_cols[a], x_cols[a + 1]], [ya, yb], color="#888888", linewidth=0.4, alpha=0.5)
 
-    ax.text(x_cols[0], 3.03, "16", ha="center", fontsize=10)
-    ax.text(x_cols[1], 3.03, "500", ha="center", fontsize=10)
-    ax.text(x_cols[2], 3.03, "151", ha="center", fontsize=10)
+    # 每列下面标维度
+    for xi, label in zip(x_cols, ["16", "512", "256", "151"]):
+        ax.text(xi, 3.03, label, ha="center", fontsize=10)
 
 
 def main() -> None:
@@ -148,126 +118,59 @@ def main() -> None:
     ax.axis("off")
     fig.patch.set_facecolor("white")
 
+    # ---- 标题 ----
     ax.text(6.0, 5.72, "AR-EMT 端到端训练网络结构", ha="center", va="center", fontsize=24, weight="bold")
-    ax.text(
-        6.0,
-        5.42,
-        "输入是按位深缩放后的光谱强度；物理编码器给出 16 通道测量；MLP 线性输出重建 151 维光谱",
-        ha="center",
-        va="center",
-        fontsize=13,
-        color="#333333",
-    )
+    ax.text(6.0, 5.42,
+            "输入是按位深缩放后的光谱强度；物理编码器给出 16 通道测量(训练时加噪)；MLP 输出重建 151 维光谱",
+            ha="center", va="center", fontsize=13, color="#333333")
 
-    add_box(
-        ax,
-        (0.30, 3.55),
-        (1.70, 1.35),
-        "输入光谱",
-        "S(λ)\nshape: [B,151]\nλ = 400-700 nm\n保留相对明暗\n不做逐条归一化",
-        "#d6eaf8",
-    )
+    # ---- 主干各个框 ----
+    add_box(ax, (0.30, 3.55), (1.70, 1.35), "输入光谱",
+            "S(λ)\nshape: [B,151]\nλ = 400-700 nm\n保留相对明暗\n不做逐条归一化", "#d6eaf8")
 
-    add_box(
-        ax,
-        (2.45, 3.45),
-        (2.45, 1.55),
-        "可训练光学编码器",
-        "16 个滤光片\n每通道只改变 D/P\nρ → r=D/P → D → f → n_eff\n共享厚度: h_c, t_r, AR 层",
-        "#fdebd0",
-    )
+    add_box(ax, (2.45, 3.45), (2.45, 1.55), "可训练光学编码器",
+            "16 个滤光片\n每通道只改变 D/P\nρ → r=D/P → D → f → n_eff\n共享厚度: h_c, t_r, AR 层", "#fdebd0")
 
-    add_box(
-        ax,
-        (5.35, 3.45),
-        (1.25, 1.55),
-        "可微 TMM",
-        "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [16,151]",
-        "#e8daef",
-        title_size=12,
-        body_size=9,
-    )
+    add_box(ax, (5.35, 3.45), (1.25, 1.55), "可微 TMM",
+            "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [16,151]", "#e8daef", title_size=12, body_size=9)
 
-    add_box(
-        ax,
-        (7.05, 3.45),
-        (1.45, 1.55),
-        "光电测量",
-        "y_m = Σ S(λ)T_m(λ)\n保持积分和\nshape: [B,16]",
-        "#d5f5e3",
-        title_size=12,
-        body_size=9,
-    )
+    add_box(ax, (7.05, 3.45), (1.45, 1.55), "光电测量 + 噪声",
+            "y_m = Σ S(λ)T_m(λ)\n积分求和\n训练时加噪声\nshape: [B,16]", "#d5f5e3", title_size=12, body_size=9)
 
-    add_box(
-        ax,
-        (8.90, 3.00),
-        (2.85, 2.00),
-        "解码器 MLP",
-        "Linear: 16 → 500\nLeakyReLU(0.01)\nLinear: 500 → 151\n最后一层线性输出\n下方圆点只是维度示意",
-        "#fcf3cf",
-        body_size=9.5,
-    )
+    add_box(ax, (8.90, 3.00), (2.85, 2.00), "解码器 MLP",
+            "Linear: 16 → 512\nLinear: 512 → 256\nLeakyReLU(0.01)\nLinear: 256 → 151\nSoftplus 输出(≥0)", "#fcf3cf", body_size=9.5)
     draw_decoder_nodes(ax)
 
-    add_box(
-        ax,
-        (10.05, 1.35),
-        (1.65, 1.10),
-        "重建光谱",
-        "Ŝ(λ)\nshape: [B,151]\n目标是接近输入 S(λ)",
-        "#d4efdf",
-    )
+    add_box(ax, (10.05, 1.35), (1.65, 1.10), "重建光谱",
+            "Ŝ(λ) ≥ 0\nshape: [B,151]\n目标是接近 S(λ)", "#d4efdf")
 
-    add_box(
-        ax,
-        (3.50, 0.75),
-        (3.80, 1.35),
-        "训练目标",
-        "loss = MSE(Ŝ, S) + λ_trans · max(0, T_target - T_mean)^2\n默认 T_target = 0.75, λ_trans = 0.05\ntor 只记录，不参与 loss",
-        "#f9e79f",
-    )
+    # ---- 训练目标 / 参数 / 数据划分 ----
+    add_box(ax, (3.30, 0.70), (4.25, 1.45), "训练目标 (loss)",
+            "loss = MSE(Ŝ, S)\n     + λ_sam · 光谱角(保住谱形)\n"
+            "     + λ_trans · max(0, T_target − T_mean)²  (吞吐量)\n"
+            "     + λ_coh · 通道去相关(让16个滤光片互补)\n后三项可单独设 0 关闭", "#f9e79f", body_size=9.5)
 
-    add_box(
-        ax,
-        (0.55, 0.75),
-        (2.25, 1.35),
-        "会被更新的参数",
-        "编码器: ρ[16], h_c, t_r, AR[4]\n解码器: 两个 Linear 的权重和偏置\n优化器: AdamW + 梯度裁剪",
-        "#fadbd8",
-        body_size=9.5,
-    )
+    add_box(ax, (0.55, 0.70), (2.55, 1.45), "会被更新的参数",
+            "编码器: ρ[16], h_c, t_r, AR[4]\n解码器: 三个 Linear 的权重/偏置\n优化器: AdamW + 梯度裁剪\n结构参数学习率更小", "#fadbd8", body_size=9.0)
 
-    add_box(
-        ax,
-        (7.75, 0.55),
-        (2.90, 0.90),
-        "训练/验证/测试",
-        "train 更新参数，val 选择 best。\ntest 只在最终评估脚本里使用。",
-        "#ebedef",
-        title_size=12,
-        body_size=9.5,
-    )
+    add_box(ax, (7.85, 0.55), (2.85, 0.90), "训练/验证/测试",
+            "train 更新参数, val 选 best。\ntest 只在 04 最终评估用。\n数据按“场景”划分, 互不串味。", "#ebedef", title_size=12, body_size=9.0)
 
+    # ---- 正向箭头 ----
     add_arrow(ax, (2.00, 4.25), (2.45, 4.25), "输入")
     add_arrow(ax, (4.90, 4.25), (5.35, 4.25), "结构参数")
     add_arrow(ax, (6.60, 4.25), (7.05, 4.25), "透过谱")
     add_arrow(ax, (8.50, 4.25), (8.90, 4.25), "16维测量")
     add_arrow(ax, (10.90, 3.00), (10.90, 2.45), "输出")
-    add_arrow(ax, (10.05, 1.90), (7.30, 1.40), "与真值比较", curve=-0.12)
+    add_arrow(ax, (10.05, 1.90), (7.55, 1.45), "与真值比较", curve=-0.12)
 
-    add_arrow(ax, (5.05, 1.50), (3.40, 3.45), "反向传播更新光学结构", curve=-0.25, color="#2874a6", dashed=True)
-    add_arrow(ax, (7.30, 1.50), (10.15, 3.00), "反向传播更新 MLP", curve=0.25, color="#2874a6", dashed=True)
+    # ---- 反向传播（虚线，蓝色）----
+    add_arrow(ax, (5.05, 1.45), (3.40, 3.45), "反向传播更新光学结构", curve=-0.25, color="#2874a6", dashed=True)
+    add_arrow(ax, (7.30, 1.45), (10.15, 3.00), "反向传播更新 MLP", curve=0.25, color="#2874a6", dashed=True)
 
-    ax.text(
-        6.0,
-        0.20,
-        "当前模型不是 CNN，也不学习空间邻域；它学习的是单条光谱经过 16 个物理滤光片后的重建关系。",
-        ha="center",
-        va="center",
-        fontsize=11,
-        color="#333333",
-    )
+    ax.text(6.0, 0.18,
+            "当前模型不是 CNN, 也不学空间邻域；它学的是“单条光谱经过 16 个物理滤光片后如何重建”。",
+            ha="center", va="center", fontsize=11, color="#333333")
 
     png_path = output_dir / f"{settings['output_stem']}.png"
     svg_path = output_dir / f"{settings['output_stem']}.svg"
