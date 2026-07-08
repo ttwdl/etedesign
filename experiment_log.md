@@ -9,3 +9,9 @@
 | 36ch_t06_tor15_150 | Phase 0 诊断，不改训练 | 2.276056e-04 | 6.501714e-03 | 0.07682 | 36.43 | N/A | 0.78838 | 3.15 | pinv MSE=1.29e-03; coh=0.949; subspace=1.50e-05 |
 
 Phase 0 诊断输出目录：`diagnostics_phase0_16_25_36/`。
+
+## Phase 1 formal：loss/selection/subspace 修改实验
+
+| 实验名 | 改了什么 | test MSE | test L1 | test SAM | PSNR | pinv MSE | T_mean | Phi有效秩 | 结论 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| results_phase1_formal_selected_150 | 由 `phase1_subspace010_50` 筛选进入 150 轮 | 2.745206e-04 | 7.256268e-03 | 0.08038 | 35.61 | 1.410563e-05 | 0.80189 | 2.98 | tor=1.987%, coh=0.9545 |
