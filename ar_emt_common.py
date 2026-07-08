@@ -613,6 +613,86 @@ def sam_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return torch.mean(torch.arccos(cos_val))
 
 
+def charbonnier_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+    """Charbonnier loss：平滑版 L1，用来减少 MSE 把尖峰抹平的问题。
+
+    普通 MSE 会把大误差平方放大，训练时容易倾向于输出一条“平均且平滑”的曲线；
+    L1 更直接逼每个波长点靠近，但在 0 附近不可导。Charbonnier 可以理解成：
+
+        sqrt((预测 - 真实)^2 + eps^2)
+
+    它长得像 L1，但更平滑，反向传播更稳定。eps 越小越接近普通 L1。
+    输入 pred/target shape 都是 [B, 151]，输出是一个标量。
+    """
+
+    return torch.mean(torch.sqrt((pred - target).square() + float(eps) ** 2))
+
+
+def diff2_l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """二阶差分 L1：约束光谱曲线的“弯曲程度/曲率”。
+
+    一阶差分看相邻波长点的斜率；二阶差分看斜率本身怎么变化。
+    如果预测光谱的峰太钝、太圆，或者曲率位置不对，这个 loss 会变大。
+
+    pred/target:
+        [B, 151]，B 是 batch 大小，151 是波长点数。
+    返回:
+        标量，越小表示预测曲线的弯曲形状越接近真实曲线。
+    """
+
+    pred_d2 = pred[:, 2:] - 2.0 * pred[:, 1:-1] + pred[:, :-2]
+    target_d2 = target[:, 2:] - 2.0 * target[:, 1:-1] + target[:, :-2]
+    return torch.mean(torch.abs(pred_d2 - target_d2))
+
+
+def subspace_residual_loss(spectra: torch.Tensor, phi: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """subspace 残差 loss：让滤光片矩阵 Phi 的行空间覆盖真实光谱变化。
+
+    这里的 Phi 就是 0 度或当前 batch 角度下的滤光片透过谱矩阵：
+        Phi shape = [C, 151]
+        C 是滤光片通道数，151 是波长点数。
+
+    一条光谱 S 经过滤光片后得到 C 个测量值，本质上只能看到 Phi 行空间里的信息。
+    如果真实光谱有很多成分落在 row(Phi) 外面，不管解码器多聪明都很难恢复。
+    所以这个 loss 做的事情是：
+        1. 把真实光谱 S 投影到 row(Phi)；
+        2. 计算 S 和投影结果之间的 MSE；
+        3. 训练时压低这个残差，逼 Phi 覆盖数据里最重要的方向。
+
+    eps 是给 Phi Phi^T 加的小对角正则，防止矩阵接近奇异时求解不稳定。
+    """
+
+    phi_real = phi.real if torch.is_complex(phi) else phi
+    spectra_real = spectra.real if torch.is_complex(spectra) else spectra
+    phi_real = phi_real.to(device=spectra_real.device, dtype=spectra_real.dtype)
+
+    gram = phi_real @ phi_real.t()
+    eye = torch.eye(phi_real.shape[0], device=phi_real.device, dtype=phi_real.dtype)
+    basis = torch.linalg.solve(gram + float(eps) * eye, phi_real)  # [C,151]
+    proj = (spectra_real @ phi_real.t()) @ basis                   # [B,151]
+    return torch.mean((spectra_real - proj).square())
+
+
+def phi_effective_rank(phi: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """计算滤光片矩阵 Phi 的“有效秩”，越大表示独立信息维度越多。
+
+    普通 rank 只判断奇异值是不是严格为 0，对连续训练不够直观。
+    有效秩把奇异值归一化成一个概率分布，再用熵估计“等效有几个维度”：
+
+        p_i = s_i / sum(s)
+        effective_rank = exp(-sum(p_i log p_i))
+
+    如果 25 个通道其实只有 4 个主要方向，它会接近 4，而不是机械地等于 25。
+    这个函数主要用于日志和 TensorBoard 观察，不放进 loss。
+    """
+
+    phi_real = phi.real if torch.is_complex(phi) else phi
+    singular_values = torch.linalg.svdvals(phi_real)
+    prob = singular_values / (singular_values.sum() + eps)
+    entropy = -torch.sum(prob * torch.log(prob + eps))
+    return torch.exp(entropy)
+
+
 # =============================================================================
 # 第 6 部分：AR-EMT 模型（物理编码器 + MLP 解码器）
 # =============================================================================

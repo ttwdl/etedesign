@@ -12,10 +12,12 @@
     → 让 Ŝ(λ) 尽量接近 S(λ)。
 
 损失(loss)由几项组成，除了 MSE 外都能单独开关（把对应权重设 0 即可）：
-  loss = MSE(还原误差, 主目标)
+  loss = MSE 或 Charbonnier(还原误差, 主目标)
        + lambda_l1   · L1 逐点绝对误差  (直接逼每个波长点对齐)
        + lambda_diff · 一阶差分 L1      (逼谱峰/谱形变化趋势对齐)
+       + lambda_diff2· 二阶差分 L1      (逼曲线弯曲/峰形曲率对齐)
        + lambda_sam  · 光谱角      (轻微保住谱形，防止把峰抹平)
+       + lambda_subspace · Phi 行空间残差 (让滤光片覆盖数据主变化方向)
        + lambda_trans· 吞吐量惩罚  (别让滤光片整体太暗)
        + lambda_coh  · 通道去相关  (让滤光片形状尽量互补, 重建更好还原)
        + lambda_tor  · tor 下限约束 (让最相似的两个通道也至少拉开一点)
@@ -52,14 +54,18 @@ from ar_emt_common import (
     AREMTModel,
     GeometryConfig,
     add_measurement_noise,
+    charbonnier_loss,
+    diff2_l1_loss,
     differentiable_tor_percent,
     emt_condition,
     evaluate_fixed_angle,
     geometry_report,
     model_kwargs_from_settings,
     measurement_matrix_coherence,
+    phi_effective_rank,
     sam_loss,
     structure_rows,
+    subspace_residual_loss,
     tor_percent,
 )
 
@@ -120,6 +126,17 @@ USER_SETTINGS = {
     "lambda_diff": 0.20,    # 一阶差分 L1 权重：逼曲线起伏、谱峰边缘更贴近
     "tor_target_percent": 1.5,  # 36 通道最相似的一对更难拉开，先用 1.5% 避免过度牺牲重建
     "lambda_tor": 0.01,         # tor 下限约束权重；先温和开，太大会牺牲重建精度
+
+    # ---- Phase 1 新增 loss / best 选择设置 ----
+    # 默认都保持旧行为：主 loss 还是 MSE，best 还是按旧 val_recon_loss 算。
+    # Phase 1 runner 会在自己的实验设置里打开这些开关。
+    "loss_mode": "mse",              # "mse"=旧版均方误差；"charbonnier"=平滑L1主损失
+    "charbonnier_eps": 1e-3,          # Charbonnier 的平滑小量，越小越接近普通 L1
+    "lambda_diff2": 0.0,              # 二阶差分 L1 权重：约束谱峰曲率；默认关闭
+    "lambda_subspace": 0.0,           # subspace 残差权重：让 Phi 行空间覆盖光谱主方向；默认关闭
+    "subspace_eps": 1e-4,             # subspace 投影时的矩阵稳定项
+    "selection_score_mode": "old",    # "old"=旧分数；"l1_diff_sam"=更重视逐点/谱形
+    "sel_lambda_sam": 0.3,            # selection_score_mode="l1_diff_sam" 时 SAM 的选择权重
 
     # ---- 优化器 ----
     # 物理结构参数和解码器分两组：结构参数学习率更小、不加 weight decay。
@@ -225,6 +242,16 @@ def reconstruction_score(metrics: dict, settings: dict) -> float:
     但验证时不加噪声、不加随机角度，所以更适合判断模型真实重建能力。
     """
 
+    mode = settings.get("selection_score_mode", "old")
+    if mode == "l1_diff_sam":
+        return (
+            float(metrics["l1"])
+            + settings["lambda_diff"] * float(metrics["diff_l1"])
+            + settings["sel_lambda_sam"] * float(metrics["sam"])
+        )
+    if mode != "old":
+        raise ValueError(f"未知 selection_score_mode: {mode}")
+
     return (
         float(metrics["mse"])
         + settings["lambda_l1"] * float(metrics["l1"])
@@ -276,9 +303,10 @@ def save_csv(rows: list[dict], path: Path) -> None:
 # ---- 训练日志：只记“训练/验证曲线 + 关键光学量”，结构参数另存一份 CSV ----
 TRAIN_LOG_HEADER = [
     "epoch", "lr_physics", "lr_decoder",
-    "train_loss", "train_mse", "train_l1", "train_diff_l1", "train_tor_percent", "train_tor_penalty",
+    "train_loss", "train_mse", "train_l1", "train_diff_l1", "train_sam",
+    "train_diff2_l1", "train_subspace", "train_tor_percent", "train_tor_penalty",
     "val_recon_loss", "val_mse", "val_l1", "val_diff_l1", "val_psnr", "val_sam",
-    "T0_mean", "T0_min", "tor_percent", "coherence0", "grad_norm",
+    "T0_mean", "T0_min", "tor_percent", "coherence0", "phi_effective_rank", "grad_norm",
 ]
 
 
@@ -427,6 +455,9 @@ def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMT
     writer.add_scalar("loss/train_mse", float(row["train_mse"]), epoch)
     writer.add_scalar("loss/train_l1", float(row["train_l1"]), epoch)
     writer.add_scalar("loss/train_diff_l1", float(row["train_diff_l1"]), epoch)
+    writer.add_scalar("loss/train_sam", float(row["train_sam"]), epoch)
+    writer.add_scalar("loss/train_diff2_l1", float(row["train_diff2_l1"]), epoch)
+    writer.add_scalar("loss/train_subspace", float(row["train_subspace"]), epoch)
     writer.add_scalar("loss/train_tor_penalty", float(row["train_tor_penalty"]), epoch)
     writer.add_scalar("loss/val_recon_loss", float(row["val_recon_loss"]), epoch)
     writer.add_scalar("loss/val_mse", float(row["val_mse"]), epoch)
@@ -439,6 +470,7 @@ def write_tensorboard(writer: SummaryWriter, epoch: int, row: dict, model: AREMT
     writer.add_scalar("optics/tor_percent", float(row["tor_percent"]), epoch)
     writer.add_scalar("optics/train_tor_percent", float(row["train_tor_percent"]), epoch)
     writer.add_scalar("optics/coherence0", float(row["coherence0"]), epoch)
+    writer.add_scalar("optics/phi_effective_rank", float(row["phi_effective_rank"]), epoch)
     writer.add_scalar("train/grad_norm", float(row["grad_norm"]), epoch)
     writer.add_scalar("train/lr_physics", float(row["lr_physics"]), epoch)
     writer.add_scalar("train/lr_decoder", float(row["lr_decoder"]), epoch)
@@ -528,7 +560,8 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
     perm = torch.randperm(n_train)  # 每个 epoch 打乱一次样本顺序
 
     # 累加器，用来算这一轮的平均值
-    loss_sum = mse_sum = l1_sum = diff_l1_sum = t_mean_sum = coh_sum = tor_sum = tor_penalty_sum = 0.0
+    loss_sum = mse_sum = l1_sum = diff_l1_sum = sam_sum = diff2_sum = subspace_sum = 0.0
+    t_mean_sum = coh_sum = tor_sum = tor_penalty_sum = 0.0
     grad_norm_last = 0.0
     n_seen = 0
     epoch_start = time.time()
@@ -547,8 +580,14 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         pred = model.decoder(meas)                                    # 还原回 151 维 [B,151]
 
         # ---------------- loss：主目标 + 各种可选约束 ----------------
-        loss_mse = mse_fn(pred, batch)                                # 主目标：还原误差
-        loss = loss_mse
+        loss_mse = mse_fn(pred, batch)                                # MSE 诊断值：一直记录，方便横向比较
+        loss_mode = settings.get("loss_mode", "mse")
+        if loss_mode == "mse":
+            loss = loss_mse                                           # 旧行为：主目标就是均方误差
+        elif loss_mode == "charbonnier":
+            loss = charbonnier_loss(pred, batch, eps=settings.get("charbonnier_eps", 1e-3))
+        else:
+            raise ValueError(f"未知 loss_mode: {loss_mode}")
 
         loss_l1 = torch.mean(torch.abs(pred - batch))                 # 逐波长点绝对误差
         if settings["lambda_l1"] > 0:
@@ -558,8 +597,20 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         if settings["lambda_diff"] > 0:
             loss = loss + settings["lambda_diff"] * loss_diff_l1
 
-        if settings["lambda_sam"] > 0:                               # 谱形约束(可选)
-            loss = loss + settings["lambda_sam"] * sam_loss(pred, batch)
+        loss_diff2_l1 = diff2_l1_loss(pred, batch)                    # 二阶差分：曲率/峰形误差
+        if settings.get("lambda_diff2", 0.0) > 0:
+            loss = loss + settings["lambda_diff2"] * loss_diff2_l1
+
+        loss_sam = sam_loss(pred, batch)                              # 光谱角：形状方向误差
+        if settings["lambda_sam"] > 0:                                # 谱形约束(可选)
+            loss = loss + settings["lambda_sam"] * loss_sam
+
+        # subspace loss 只管“真实光谱能不能被 Phi 的行空间表示”。
+        # per_sample 角度下 t_use 是 [B,C,151]，这里取 batch 平均作为这一批的代表 Phi。
+        phi_for_subspace = t_use if t_use.ndim == 2 else t_use.mean(dim=0)
+        loss_subspace = subspace_residual_loss(batch, phi_for_subspace, eps=settings.get("subspace_eps", 1e-4))
+        if settings.get("lambda_subspace", 0.0) > 0:
+            loss = loss + settings["lambda_subspace"] * loss_subspace
 
         t_mean = t.mean()                                            # 平均透过率
         if settings["lambda_trans"] > 0:                            # 吞吐量约束：别让滤光片太暗
@@ -590,6 +641,9 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         mse_sum += float(loss_mse.detach().cpu()) * bs
         l1_sum += float(loss_l1.detach().cpu()) * bs
         diff_l1_sum += float(loss_diff_l1.detach().cpu()) * bs
+        sam_sum += float(loss_sam.detach().cpu()) * bs
+        diff2_sum += float(loss_diff2_l1.detach().cpu()) * bs
+        subspace_sum += float(loss_subspace.detach().cpu()) * bs
         t_mean_sum += float(t_mean.detach().cpu()) * bs
         coh_sum += float(coh.detach().cpu()) * bs
         tor_sum += float(tor_train.detach().cpu()) * bs
@@ -605,12 +659,17 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
                 writer.add_scalar("batch/mse", float(loss_mse.detach().cpu()), gb)
                 writer.add_scalar("batch/l1", float(loss_l1.detach().cpu()), gb)
                 writer.add_scalar("batch/diff_l1", float(loss_diff_l1.detach().cpu()), gb)
+                writer.add_scalar("batch/sam", float(loss_sam.detach().cpu()), gb)
+                writer.add_scalar("batch/diff2_l1", float(loss_diff2_l1.detach().cpu()), gb)
+                writer.add_scalar("batch/subspace", float(loss_subspace.detach().cpu()), gb)
                 writer.add_scalar("batch/tor_percent", float(tor_train.detach().cpu()), gb)
             elapsed = time.time() - epoch_start
             pct = batch_index / n_batches * 100.0
             print(f"\repoch {epoch:04d}/{n_epochs} batch {batch_index:04d}/{n_batches:04d} ({pct:5.1f}%) | "
                   f"loss={float(loss.detach().cpu()):.4e} | mse={float(loss_mse.detach().cpu()):.4e} | "
                   f"l1={float(loss_l1.detach().cpu()):.4e} | diff={float(loss_diff_l1.detach().cpu()):.4e} | "
+                  f"sam={float(loss_sam.detach().cpu()):.3e} | diff2={float(loss_diff2_l1.detach().cpu()):.3e} | "
+                  f"sub={float(loss_subspace.detach().cpu()):.3e} | "
                   f"Tmean={float(t_mean.detach().cpu()):.4f} | tor={float(tor_train.detach().cpu()):.3f}% | "
                   f"coh={float(coh.detach().cpu()):.4f} | "
                   f"grad={grad_norm_last:.3e} | {elapsed:6.1f}s", end="", flush=True)
@@ -621,6 +680,9 @@ def run_one_epoch(model, train_cpu, optimizer, mse_fn, settings, device, epoch, 
         "train_mse": mse_sum / n_seen,
         "train_l1": l1_sum / n_seen,
         "train_diff_l1": diff_l1_sum / n_seen,
+        "train_sam": sam_sum / n_seen,
+        "train_diff2_l1": diff2_sum / n_seen,
+        "train_subspace": subspace_sum / n_seen,
         "train_tor_percent": tor_sum / n_seen,
         "train_tor_penalty": tor_penalty_sum / n_seen,
         "train_Tmean": t_mean_sum / n_seen,
@@ -682,7 +744,10 @@ def main() -> None:
     print(f"noise: rel={settings['noise_rel']}, abs={settings['noise_abs']} | "
           f"lambda: trans={settings['lambda_trans']}, coh={settings['lambda_coh']}, "
           f"sam={settings['lambda_sam']}, l1={settings['lambda_l1']}, diff={settings['lambda_diff']}, "
+          f"diff2={settings.get('lambda_diff2', 0.0)}, subspace={settings.get('lambda_subspace', 0.0)}, "
           f"tor={settings['lambda_tor']}@{settings['tor_target_percent']}%")
+    print(f"loss_mode={settings.get('loss_mode', 'mse')}, "
+          f"selection_score_mode={settings.get('selection_score_mode', 'old')}")
     print(f"训练日志: {train_log_path}")
     print(f"训练曲线: {progress_plot_path}")
     print(f"看 TensorBoard: 运行 06_start_tensorboard.py")
@@ -709,6 +774,7 @@ def main() -> None:
             t0 = model.transmission(torch.tensor([0.0], device=device))[0]
             tor = tor_percent(t0)
             coherence0 = float(measurement_matrix_coherence(t0).detach().cpu())
+            phi_rank = float(phi_effective_rank(t0).detach().cpu())
             t_mean_eval = float(t0.mean().detach().cpu())
             t_min_eval = float(t0.min().detach().cpu())
 
@@ -720,6 +786,9 @@ def main() -> None:
             "train_mse": train_info["train_mse"],
             "train_l1": train_info["train_l1"],
             "train_diff_l1": train_info["train_diff_l1"],
+            "train_sam": train_info["train_sam"],
+            "train_diff2_l1": train_info["train_diff2_l1"],
+            "train_subspace": train_info["train_subspace"],
             "train_tor_percent": train_info["train_tor_percent"],
             "train_tor_penalty": train_info["train_tor_penalty"],
             "val_recon_loss": val_score,
@@ -732,6 +801,7 @@ def main() -> None:
             "T0_min": t_min_eval,
             "tor_percent": tor,
             "coherence0": coherence0,
+            "phi_effective_rank": phi_rank,
             "grad_norm": train_info["grad_norm"],
         }
 
@@ -754,7 +824,8 @@ def main() -> None:
               f"psnr={row['val_psnr']:.2f} | sam={row['val_sam']:.4f} | "
               f"T0_mean={row['T0_mean']:.4f} T0_min={row['T0_min']:.4f} | "
               f"train_tor={row['train_tor_percent']:.3f}% eval_tor={row['tor_percent']:.3f}% "
-              f"coh={row['coherence0']:.4f} | grad={row['grad_norm']:.3e}")
+              f"coh={row['coherence0']:.4f} phi_rank={row['phi_effective_rank']:.2f} | "
+              f"grad={row['grad_norm']:.3e}")
         print_structure_brief(model)
 
         # 只有验证集重建总分创新低时，才更新 best checkpoint
