@@ -83,12 +83,12 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
 
     # 从上到下的层（名字, 厚度nm, 颜色）
     layers = [
-        ("top L: SiO2", ar[0], "#9ecae1"),
-        ("top H: TiO2", ar[1], "#fdae6b"),
-        ("residual SU-8", t_r, "#c7e9c0"),
-        ("EMT cavity\nTiO2 pillars + SU-8 fill", h_c, "#fff7bc"),
-        ("bottom H: TiO2", ar[2], "#fdae6b"),
-        ("bottom L: SiO2", ar[3], "#9ecae1"),
+        ("上方 L: SiO2低折射率层", ar[0], "#9ecae1"),
+        ("上方 H: TiO2高折射率层", ar[1], "#fdae6b"),
+        ("残留 SU-8 胶层 t_r", t_r, "#c7e9c0"),
+        ("EMT腔 h_c\nTiO2柱 + SU-8填隙", h_c, "#fff7bc"),
+        ("下方 H: TiO2高折射率层", ar[2], "#fdae6b"),
+        ("下方 L: SiO2低折射率层", ar[3], "#9ecae1"),
     ]
 
     def draw_height(thickness_nm: float) -> float:
@@ -101,39 +101,40 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
     for name, thickness, color in reversed(layers):   # reversed: 从下往上堆
         h = draw_height(float(thickness))
         ax.add_patch(Rectangle((x0, y), width, h, facecolor=color, edgecolor="black", linewidth=0.8))
-        ax.text(x0 + width + 0.04, y + h / 2, f"{name}: {thickness:.2f} nm", va="center", fontsize=9)
+        ax.text(x0 + width + 0.04, y + h / 2, f"{name}: {thickness:.2f} nm", va="center", fontsize=8.5)
         y_positions.append((name, y, h))
         y += h
 
     # 底部基底 + 顶部空气
     ax.add_patch(Rectangle((x0, -0.38), width, 0.38, facecolor="#d9d9d9", edgecolor="black", linewidth=0.8))
-    ax.text(x0 + width / 2, -0.19, "fused silica substrate", ha="center", va="center", fontsize=9)
-    ax.text(x0 + width / 2, y + 0.18, "air", ha="center", va="center", fontsize=10)
+    ax.text(x0 + width / 2, -0.19, "熔石英基底", ha="center", va="center", fontsize=9)
+    ax.text(x0 + width / 2, y + 0.18, "空气", ha="center", va="center", fontsize=10)
 
     # 在 EMT 腔里画几根 TiO2 柱子示意
-    cavity = [v for v in y_positions if v[0].startswith("EMT cavity")][0]
+    cavity = [v for v in y_positions if v[0].startswith("EMT腔")][0]
     _, cy, ch = cavity
     pillar_width = width * (d_mid / period) * 0.22
     for px in [x0 + width * 0.28, x0 + width * 0.50, x0 + width * 0.72]:
         ax.add_patch(Rectangle((px - pillar_width / 2, cy), pillar_width, ch,
                                facecolor="#e6550d", edgecolor="#7f2704", linewidth=0.6))
-    ax.text(x0 + width / 2, cy + ch / 2, "SU-8 fills gaps\nTiO2 pillars",
+    ax.text(x0 + width / 2, cy + ch / 2, "SU-8填充空隙\nTiO2柱",
             ha="center", va="center", fontsize=9, color="black")
     ax.text(
         x0,
         y + 0.02,
-        f"shown: ch{mid_ch}; trained global H_total = h_c + t_r = {core_total:.1f} nm\n"
-        f"h_c range {h_c_all.min():.1f}-{h_c_all.max():.1f} nm, "
-        f"t_r range {t_r_all.min():.1f}-{t_r_all.max():.1f} nm\n"
-        f"aspect h_c/D range {aspect.min():.2f}-{aspect.max():.2f}, limit {aspect_max:.1f}",
+        f"符号说明: ch{mid_ch}为示例通道；H_total=h_c+t_r={core_total:.1f} nm\n"
+        f"h_c=TiO2柱高/EMT腔厚: {h_c_all.min():.1f}-{h_c_all.max():.1f} nm；"
+        f"t_r=残留SU-8厚度: {t_r_all.min():.1f}-{t_r_all.max():.1f} nm\n"
+        f"D=柱径；深宽比=h_c/D: {aspect.min():.2f}-{aspect.max():.2f}，工艺上限 {aspect_max:.1f}",
         ha="left",
         va="bottom",
-        fontsize=8,
+        fontsize=7.5,
+        bbox=dict(facecolor="white", edgecolor="#cccccc", alpha=0.85, pad=2.0),
     )
 
-    ax.set_xlim(0, 1.85)
+    ax.set_xlim(0, 2.00)
     ax.set_ylim(-0.45, y + 1.25)
-    ax.set_title("Vertical stack", pad=14)
+    ax.set_title("纵向层结构", pad=14)
     ax.axis("off")
 
 
@@ -156,7 +157,7 @@ def draw_channel_layout(ax, model: AREMTModel) -> None:
     ax.set_aspect("equal")
     ax.set_xlim(0, n_cols); ax.set_ylim(0, n_rows)
     ax.invert_yaxis()
-    ax.set_title(f"{n_channels} filters: D and h_c change, shared H_total")
+    ax.set_title(f"{n_channels}个滤光片: D柱径和h_c柱高逐通道变化，H_total总腔长共享")
 
     for ch in range(n_rows * n_cols):
         i = ch // n_cols
@@ -170,14 +171,21 @@ def draw_channel_layout(ax, model: AREMTModel) -> None:
         ax.text(
             x + 0.5,
             y + 0.78,
-            f"ch{ch}\nD={d_values[ch]:.0f} G={gap_values[ch]:.0f}\n"
-            f"h={hc_values[ch]:.0f} r={tr_values[ch]:.0f}",
+            f"ch{ch}\nD柱径={d_values[ch]:.0f}  G间隙={gap_values[ch]:.0f}\n"
+            f"h柱高={hc_values[ch]:.0f}  r残胶={tr_values[ch]:.0f}",
             ha="center",
             va="center",
-            fontsize=6.0 if n_channels > 16 else 7.0,
+            fontsize=4.8 if n_channels > 16 else 6.5,
         )
 
-    ax.text(n_cols / 2, n_rows + 0.25, f"Period P = {period:.1f} nm", ha="center", fontsize=9)
+    ax.text(
+        n_cols / 2,
+        n_rows + 0.33,
+        f"符号: P=周期={period:.1f} nm；G=gap=P-D；圆越大表示D越大；单位均为 nm",
+        ha="center",
+        fontsize=8.5,
+        bbox=dict(facecolor="white", edgecolor="#cccccc", alpha=0.85, pad=2.0),
+    )
     ax.set_xticks([]); ax.set_yticks([])
 
 
@@ -190,8 +198,19 @@ def draw_spectra(ax, model: AREMTModel) -> None:
 
     for idx in range(t0.shape[0]):
         ax.plot(wl, t0[idx], lw=1.0)
-    ax.set_xlabel("Wavelength (nm)"); ax.set_ylabel("Transmission")
-    ax.set_title("0 deg transmission spectra"); ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("波长 λ (nm)"); ax.set_ylabel("透过率 T")
+    ax.set_title("0度入射透过谱：每条曲线 = 一个滤光片通道 T_m(λ, α=0°)")
+    ax.text(
+        0.99,
+        0.97,
+        "符号: λ=波长；T=透过率；m=通道编号；α=入射角",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=9,
+        bbox=dict(facecolor="white", edgecolor="#cccccc", alpha=0.85, pad=2.0),
+    )
+    ax.set_ylim(0.0, 1.05)
     ax.grid(True, alpha=0.25)
 
 
@@ -216,7 +235,7 @@ def main() -> None:
     draw_channel_layout(ax_layout, model)
     draw_spectra(ax_spec, model)
 
-    fig.suptitle("AR-EMT filter design from best checkpoint", fontsize=14)
+    fig.suptitle("AR-EMT最佳25通道滤光片结构图（图内已标注符号含义）", fontsize=14)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)

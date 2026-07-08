@@ -132,33 +132,30 @@ def main() -> None:
 
     # ---- 主干各个框 ----
     add_box(ax, (0.30, 3.55), (1.70, 1.35), "输入光谱",
-            "S(λ)\nshape: [B,151]\nλ = 400-700 nm\n保留相对明暗\n不做逐条归一化", "#d6eaf8")
+            "S(λ): 真实输入光谱强度\nλ: 波长, 400-700 nm\nB: 一个batch里的光谱条数\n151: 波长采样点数\nshape: [B,151]", "#d6eaf8", body_size=9.0)
 
     add_box(ax, (2.45, 3.45), (2.45, 1.55), "可训练光学编码器",
-            "25 个滤光片\n每通道改变 D/P 和 h_c\n全局训练 H_total\n约束: h_c/D ≤ 10, t_r=H_total-h_c", "#fdebd0")
+            "25个滤光片=25个测量通道\nD: TiO2柱直径, P: 周期\nD/P: 柱径设计比例\nh_c: TiO2柱高/EMT腔厚\nH_total: 总腔长, t_r=H_total-h_c", "#fdebd0", body_size=9.0)
 
     add_box(ax, (5.35, 3.45), (1.25, 1.55), "可微 TMM",
-            "由层结构计算\nT_m(λ, α)\n输出透过谱\nshape: [25,151]", "#e8daef", title_size=12, body_size=9)
+            "T_m(λ, α):\n第m个滤光片透过率\nm: 通道编号\nα: 入射角\nshape: [25,151]", "#e8daef", title_size=12, body_size=8.5)
 
     add_box(ax, (7.05, 3.45), (1.45, 1.55), "光电测量 + 噪声",
-            "y_m = Σ S(λ)T_m(λ)\n积分求和\n训练时加噪声\nshape: [B,25]", "#d5f5e3", title_size=12, body_size=9)
+            "y_m: 第m个探测器读数\nΣ: 对151个波长点求和\ny_m = Σ S(λ)T_m(λ)\n训练时加测量噪声\nshape: [B,25]", "#d5f5e3", title_size=12, body_size=8.5)
 
     add_box(ax, (8.90, 3.00), (2.85, 2.00), "解码器 MLP",
-            "Linear: 25 → 768\nLinear: 768 → 384\nLeakyReLU(0.01)\nLinear: 384 → 151\nSoftplus 输出(≥0)", "#fcf3cf", body_size=9.5)
+            "Linear: 全连接层\n25 → 768 → 384 → 151\nLeakyReLU: 非线性激活\nSoftplus: 保证输出非负\n输入25维测量, 输出151维光谱", "#fcf3cf", body_size=9.0)
     draw_decoder_nodes(ax)
 
     add_box(ax, (10.05, 1.35), (1.65, 1.10), "重建光谱",
-            "Ŝ(λ) ≥ 0\nshape: [B,151]\n目标是接近 S(λ)", "#d4efdf")
+            "Ŝ(λ): 网络预测光谱\nŜ(λ) ≥ 0\nshape: [B,151]\n目标: 接近S(λ)", "#d4efdf", body_size=9.0)
 
     # ---- 训练目标 / 参数 / 数据划分 ----
     add_box(ax, (3.30, 0.70), (4.25, 1.45), "训练目标 (loss)",
-            "loss = MSE(Ŝ,S) + λ_l1·L1\n"
-            "     + λ_diff·一阶差分L1 + λ_sam·光谱角\n"
-            "     + λ_trans·吞吐量惩罚\n"
-            "     + λ_coh·通道去相关 + λ_tor·tor下限", "#f9e79f", body_size=9.5)
+            "MSE: 逐波长平方误差\nL1: 逐波长绝对误差\nλ_l1/λ_diff/...: 各loss权重\nλ_sam: 光谱角权重\nλ_coh: 通道去相关权重\nλ_tor: tor下限权重", "#f9e79f", body_size=8.8)
 
     add_box(ax, (0.55, 0.70), (2.55, 1.45), "会被更新的参数",
-            "编码器: ρ[25], H_total, h_c[25], AR[4]\nt_r 由 H_total-h_c 得到\n解码器: Linear 权重/偏置\nAdamW + 梯度裁剪", "#fadbd8", body_size=9.0)
+            "ρ[25]: 控制每通道D/P的变量\nH_total: 共享总腔长\nh_c[25]: 每通道柱高\nAR[4]: 四层增透膜厚度\nLinear权重/偏置: 解码器参数", "#fadbd8", body_size=8.8)
 
     add_box(ax, (7.85, 0.55), (2.85, 0.90), "训练/验证/测试",
             "train 更新参数, val 选 best。\ntest 只在 04 最终评估用。\n数据按“场景”划分, 互不串味。", "#ebedef", title_size=12, body_size=9.0)
@@ -175,9 +172,17 @@ def main() -> None:
     add_arrow(ax, (5.05, 1.45), (3.40, 3.45), "反向传播更新光学结构", curve=-0.25, color="#2874a6", dashed=True)
     add_arrow(ax, (7.30, 1.45), (10.15, 3.00), "反向传播更新 MLP", curve=0.25, color="#2874a6", dashed=True)
 
-    ax.text(6.0, 0.18,
-            "当前模型不是 CNN, 也不学空间邻域；它学的是“单条光谱经过 25 个物理滤光片后如何重建”。",
-            ha="center", va="center", fontsize=11, color="#333333")
+    ax.text(
+        6.0,
+        0.18,
+        "总符号说明: S=真实光谱；Ŝ=重建光谱；λ=波长；α=入射角；m=滤光片编号；B=batch样本数；"
+        "D=柱径；P=周期；h_c=柱高；t_r=残胶厚；T_m=透过率；y_m=测量值；ρ=可训练设计变量。",
+        ha="center",
+        va="center",
+        fontsize=9.5,
+        color="#333333",
+        bbox=dict(facecolor="white", edgecolor="#bdbdbd", alpha=0.95, pad=4.0),
+    )
 
     png_path = output_dir / f"{settings['output_stem']}.png"
     svg_path = output_dir / f"{settings['output_stem']}.svg"

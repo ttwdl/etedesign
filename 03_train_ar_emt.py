@@ -356,29 +356,66 @@ def save_progress_plot(log_path: Path, out_path: Path) -> None:
     coh = [float(r["coherence0"]) for r in rows]
     lr_decoder = [float(r["lr_decoder"]) for r in rows]
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-    axes[0, 0].plot(epoch, train_mse, marker="o", label="train MSE")
-    axes[0, 0].plot(epoch, val_mse, marker="o", label="val MSE")
-    axes[0, 0].plot(epoch, val_l1, marker="s", label="val L1")
-    axes[0, 0].plot(epoch, val_diff_l1, marker="^", label="val diff_L1")
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5))
+    axes[0, 0].plot(epoch, train_mse, marker="o", label="train MSE=训练集均方误差")
+    axes[0, 0].plot(epoch, val_mse, marker="o", label="val MSE=验证集均方误差")
+    axes[0, 0].plot(epoch, val_l1, marker="s", label="val L1=验证集绝对误差")
+    axes[0, 0].plot(epoch, val_diff_l1, marker="^", label="val diff_L1=谱形斜率误差")
     axes[0, 0].set_yscale("log")
-    axes[0, 0].set_xlabel("Epoch"); axes[0, 0].set_ylabel("MSE"); axes[0, 0].legend()
+    axes[0, 0].set_title("重建误差：越低越好")
+    axes[0, 0].set_xlabel("Epoch 训练轮数")
+    axes[0, 0].set_ylabel("误差值（对数坐标）")
+    axes[0, 0].legend(fontsize=8)
 
     axes[0, 1].plot(epoch, t_mean, marker="o", color="tab:green")
-    axes[0, 1].set_xlabel("Epoch"); axes[0, 1].set_ylabel("T0_mean"); axes[0, 1].set_ylim(0.0, 1.05)
+    axes[0, 1].set_title("平均透过率 T0_mean：0度入射下的平均透光能力")
+    axes[0, 1].set_xlabel("Epoch 训练轮数")
+    axes[0, 1].set_ylabel("T0_mean = 0度平均透过率")
+    axes[0, 1].set_ylim(0.0, 1.05)
 
     # 左下同时画 tor(区分度, 越大越好) 和 coherence(相关性, 越小越好)
-    axes[1, 0].plot(epoch, tor, marker="o", color="tab:orange", label="tor % (↑好)")
+    axes[1, 0].plot(epoch, tor, marker="o", color="tab:orange", label="tor 区分度↑")
     ax_coh = axes[1, 0].twinx()
-    ax_coh.plot(epoch, coh, marker="s", color="tab:red", label="coherence (↓好)")
-    axes[1, 0].set_xlabel("Epoch"); axes[1, 0].set_ylabel("tor (%)"); ax_coh.set_ylabel("coherence")
-    axes[1, 0].legend(loc="upper left"); ax_coh.legend(loc="upper right")
+    ax_coh.plot(epoch, coh, marker="s", color="tab:red", label="coherence 相关性↓")
+    axes[1, 0].set_title("滤光片通道差异")
+    axes[1, 0].set_xlabel("Epoch 训练轮数")
+    axes[1, 0].set_ylabel("tor (%)")
+    ax_coh.set_ylabel("coherence 通道相关性")
+    axes[1, 0].text(
+        0.03,
+        0.07,
+        "橙色 tor: 区分度↑",
+        transform=axes[1, 0].transAxes,
+        fontsize=8,
+        bbox=dict(facecolor="white", edgecolor="#cccccc", alpha=0.9, pad=2.0),
+    )
+    axes[1, 0].text(
+        0.45,
+        0.07,
+        "红色 coherence: 相关性↓",
+        transform=axes[1, 0].transAxes,
+        fontsize=8,
+        bbox=dict(facecolor="white", edgecolor="#cccccc", alpha=0.9, pad=2.0),
+    )
 
     axes[1, 1].plot(epoch, lr_decoder, marker="o", color="tab:purple")
     axes[1, 1].set_yscale("log")
-    axes[1, 1].set_xlabel("Epoch"); axes[1, 1].set_ylabel("decoder lr")
+    axes[1, 1].set_title("decoder lr：解码器学习率")
+    axes[1, 1].set_xlabel("Epoch 训练轮数")
+    axes[1, 1].set_ylabel("decoder lr（越小表示训练后期步子更小）")
 
-    fig.tight_layout()
+    fig.suptitle("训练过程曲线：图中已标注每个符号和指标含义", fontsize=14)
+    fig.text(
+        0.5,
+        0.015,
+        "符号说明：train=训练集；val=验证集；MSE=均方误差；L1=绝对误差；diff_L1=相邻波长差分误差；"
+        "T0_mean=0度平均透过率；tor=滤光片区分度；coherence=通道相关性；decoder lr=解码器学习率。",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        bbox=dict(facecolor="white", edgecolor="#cccccc", alpha=0.95, pad=4.0),
+    )
+    fig.tight_layout(rect=(0, 0.07, 1, 0.95))
     fig.savefig(out_path, dpi=160)
     plt.close(fig)
 
