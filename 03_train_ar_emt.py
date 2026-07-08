@@ -304,9 +304,21 @@ def save_structure_csv(model: AREMTModel, path: Path) -> None:
 # =============================================================================
 
 
+def setup_plot_font() -> None:
+    """设置画图字体。
+
+    训练曲线里有少量中文说明，例如“越大越好”。
+    Windows 上如果不指定中文字体，Matplotlib 可能会把中文画成方框。
+    """
+
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+
 def make_spectra_figure(model: AREMTModel) -> plt.Figure:
     """画当前所有通道的 0 度透过谱。"""
 
+    setup_plot_font()
     device = next(model.parameters()).device
     with torch.no_grad():
         t0 = model.transmission(torch.tensor([0.0], device=device))[0].detach().cpu()
@@ -326,6 +338,7 @@ def make_spectra_figure(model: AREMTModel) -> plt.Figure:
 def save_progress_plot(log_path: Path, out_path: Path) -> None:
     """把 train_log.csv 画成 4 张训练曲线：误差 / 平均透过率 / 区分度 / 学习率。"""
 
+    setup_plot_font()
     if not log_path.exists():
         return
     with log_path.open("r", encoding="utf-8") as f:

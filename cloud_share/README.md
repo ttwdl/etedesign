@@ -36,6 +36,8 @@
 | `figures/best_25ch_design_schematic.png` | 当前最佳结构示意图 |
 | `figures/best_25ch_eval_spectra_0deg.png` | 最佳模型的滤光片透过谱 |
 | `figures/network_architecture_ppt.png` | 网络结构图 |
+| `figures/network_architecture_ppt.svg` | 网络结构图矢量版，适合放大或放进 PPT 后继续编辑 |
+| `figures/best_25ch_train_progress.png` | 最佳 25 通道模型的训练曲线 |
 | `figures/external_beads_selected_spectra.png` | 外部场景中误差较大的例子 |
 | `figures/external_cloth_selected_spectra.png` | 外部场景中表现较好的例子 |
 | `figures/external_superballs_selected_spectra.png` | 外部场景中 MSE 最低的例子 |
@@ -47,4 +49,3 @@
 `25ch + T_target=0.6 + 更强通道差异约束 + 150 epoch`
 
 优化重点不是单纯增加通道数，而是让不同滤光片的透过谱更不一样、更有调制度。
-

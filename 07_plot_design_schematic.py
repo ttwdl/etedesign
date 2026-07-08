@@ -4,7 +4,7 @@
   & 'C:\\Users\\23\\.conda\\envs\\TMM\\python.exe' 07_plot_design_schematic.py
 
 输出:
-  results_36ch_t06_tor15_150/design_schematic.png
+  results_25ch_t06_tor20_150/design_schematic.png
 
 这张图分三块：左=纵向层结构，右上=滤光片 D/h_c 分布，下=0 度透过谱。
 注意：图不是按真实厚度比例画的（EMT 腔几百 nm，AR 层几十 nm，按真实比例会看不清），
@@ -36,8 +36,8 @@ from ar_emt_common import AREMTModel, GeometryConfig, model_kwargs_from_settings
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
-    "checkpoint": "checkpoints_36ch_t06_tor15_150/ar_emt_best.pt",
-    "output_png": "results_36ch_t06_tor15_150/design_schematic.png",
+    "checkpoint": "checkpoints_25ch_t06_tor20_150/ar_emt_best.pt",
+    "output_png": "results_25ch_t06_tor20_150/design_schematic.png",
 }
 
 
@@ -132,8 +132,8 @@ def draw_layer_stack(ax, model: AREMTModel) -> None:
     )
 
     ax.set_xlim(0, 1.85)
-    ax.set_ylim(-0.45, y + 0.70)
-    ax.set_title("Vertical stack")
+    ax.set_ylim(-0.45, y + 1.25)
+    ax.set_title("Vertical stack", pad=14)
     ax.axis("off")
 
 
