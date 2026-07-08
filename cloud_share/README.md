@@ -43,6 +43,10 @@
 | `figures/external_beads_selected_spectra.png` | 外部场景中误差较大的例子 |
 | `figures/external_cloth_selected_spectra.png` | 外部场景中表现较好的例子 |
 | `figures/external_superballs_selected_spectra.png` | 外部场景中 MSE 最低的例子 |
+| `figures/external_beads_rgb_selected_points.png` | beads 场景 RGB 预览图，P1-P9 标出取谱位置 |
+| `figures/external_beads_spectra_with_rgb.png` | beads 场景：左侧 RGB 取点，右侧对应光谱恢复 |
+| `figures/external_cloth_spectra_with_rgb.png` | cloth 场景：左侧 RGB 取点，右侧对应光谱恢复 |
+| `figures/external_superballs_spectra_with_rgb.png` | superballs 场景：左侧 RGB 取点，右侧对应光谱恢复 |
 
 ## 后续优化建议
 

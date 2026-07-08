@@ -38,19 +38,23 @@ from scipy.io import loadmat
 
 from ar_emt_common import AREMTModel, GeometryConfig, metric_mse_psnr_sam, model_kwargs_from_settings
 
+# 推理图里有中文标题和说明。这里指定中文字体，避免保存 PNG 时变成方框。
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
 
 # =============================================================================
 # 用户设置区：平时只改这里
 # =============================================================================
 USER_SETTINGS = {
     # 用 best checkpoint 推理。训练没结束时也可临时改成 checkpoints/ar_emt_last.pt。
-    "checkpoint": "checkpoints_36ch_t06_tor15_150/ar_emt_best.pt",
+    "checkpoint": "checkpoints_25ch_t06_tor20_150/ar_emt_best.pt",
 
     # 默认拿一个 CAVE 场景做例子；可改成别的 CAVE 目录或 npy/mat 文件。
     "input_path": r"E:\hyperspectral_datasets\CAVE\extracted\balloons_ms\balloons_ms",
 
     # 推理结果单独放这里，别和训练结果混。
-    "output_dir": "results_infer_36ch_t06_tor15_150",
+    "output_dir": "results_infer_25ch_t06_tor20_150",
 
     "device": "cuda",
     "angle_deg": 0.0,
@@ -241,21 +245,104 @@ def save_summary_csv(summary: dict, path: Path) -> None:
 # =============================================================================
 
 
+def selected_pixel_info(image_shape, plot_pixels, n_spectra: int):
+    """把用户写的 (y,x) 取点坐标，整理成后续画图统一使用的信息。
+
+    返回三个列表：
+    - sample_indices：拍平成 [N,151] 后对应第几个光谱；
+    - labels：图里显示的 P1、P2、P3...；
+    - coords：图像坐标 (y,x)。如果输入不是图像而是 [N,151]，这里就是 None。
+    """
+
+    n = min(len(plot_pixels), n_spectra)
+    labels = [f"P{i + 1}" for i in range(n)]
+
+    if image_shape is None:
+        return list(range(n)), labels, None
+
+    h, w = image_shape
+    sample_indices = []
+    coords = []
+    for y, x in plot_pixels[:n]:
+        yy = int(np.clip(y, 0, h - 1))
+        xx = int(np.clip(x, 0, w - 1))
+        sample_indices.append(yy * w + xx)
+        coords.append((yy, xx))
+    return sample_indices, labels, coords
+
+
+def cube_to_rgb_preview(cube_151: np.ndarray) -> np.ndarray:
+    """把 [H,W,151] 高光谱 cube 做成一张 RGB 预览图。
+
+    这里取近似波段：
+    - R: 650 nm
+    - G: 550 nm
+    - B: 450 nm
+
+    注意：这是为了看图和标点做的显示图，不参与训练和指标计算。
+    为了让画面别太暗，每个 RGB 通道会按 1%~99% 分位数做显示拉伸。
+    """
+
+    if cube_151.ndim != 3 or cube_151.shape[-1] != 151:
+        raise ValueError(f"RGB 预览需要 [H,W,151]，实际 shape={cube_151.shape}")
+
+    band_ids = [int(np.argmin(np.abs(WL_151 - wl))) for wl in [650.0, 550.0, 450.0]]
+    rgb = cube_151[:, :, band_ids].astype(np.float32)
+    out = np.zeros_like(rgb, dtype=np.float32)
+
+    for ch in range(3):
+        channel = rgb[:, :, ch]
+        lo = float(np.percentile(channel, 1.0))
+        hi = float(np.percentile(channel, 99.0))
+        if hi <= lo:
+            hi = float(channel.max()) if float(channel.max()) > lo else lo + 1e-6
+        out[:, :, ch] = np.clip((channel - lo) / (hi - lo), 0.0, 1.0)
+    return out
+
+
+def plot_rgb_selected_points(cube_151: np.ndarray, image_shape, plot_pixels, out_path: Path) -> None:
+    """画 RGB 预览图，并用 P1/P2/... 标出取光谱的位置。"""
+
+    if image_shape is None:
+        return
+
+    rgb = cube_to_rgb_preview(cube_151)
+    _sample_indices, labels, coords = selected_pixel_info(image_shape, plot_pixels, cube_151.shape[0] * cube_151.shape[1])
+    colors = plt.cm.tab10(np.linspace(0, 1, max(10, len(labels))))
+
+    fig, ax = plt.subplots(figsize=(7.0, 7.0))
+    ax.imshow(rgb)
+    ax.set_title("RGB预览图与取谱位置标记\nR=650nm, G=550nm, B=450nm；P点对应右侧/另一张图里的光谱曲线")
+    ax.axis("off")
+
+    for i, (label, (yy, xx)) in enumerate(zip(labels, coords)):
+        color = colors[i % len(colors)]
+        ax.scatter(xx, yy, s=120, marker="o", facecolors="none", edgecolors="white", linewidths=3.0)
+        ax.scatter(xx, yy, s=80, marker="o", facecolors="none", edgecolors=color, linewidths=2.0)
+        ax.text(
+            xx + 8,
+            yy - 8,
+            f"{label}\n({yy},{xx})",
+            color="white",
+            fontsize=9,
+            weight="bold",
+            bbox=dict(facecolor="black", edgecolor=color, alpha=0.65, pad=2.0),
+        )
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
 def plot_selected_spectra(gt_flat, pred_flat, image_shape, plot_pixels, out_path: Path) -> None:
     """画几个像素位置的真实光谱(实线)和重建光谱(虚线)对比。"""
 
-    if image_shape is None:
-        sample_indices = list(range(min(len(plot_pixels), gt_flat.shape[0])))
-        titles = [f"sample {idx}" for idx in sample_indices]
+    sample_indices, labels, coords = selected_pixel_info(image_shape, plot_pixels, gt_flat.shape[0])
+    if coords is None:
+        titles = [f"{label}: sample {idx}" for label, idx in zip(labels, sample_indices)]
     else:
-        h, w = image_shape
-        sample_indices = []
-        titles = []
-        for y, x in plot_pixels:
-            yy = int(np.clip(y, 0, h - 1))
-            xx = int(np.clip(x, 0, w - 1))
-            sample_indices.append(yy * w + xx)
-            titles.append(f"({yy},{xx})")
+        titles = [f"{label}: (y={yy}, x={xx})" for label, (yy, xx) in zip(labels, coords)]
+    colors = plt.cm.tab10(np.linspace(0, 1, max(10, len(labels))))
 
     n = len(sample_indices)
     n_cols = 3 if n > 4 else max(1, n)
@@ -263,15 +350,16 @@ def plot_selected_spectra(gt_flat, pred_flat, image_shape, plot_pixels, out_path
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.0 * n_cols, 2.9 * n_rows), squeeze=False)
     axes_flat = axes.ravel()
 
-    for ax, idx, title in zip(axes_flat, sample_indices, titles):
+    for i, (ax, idx, title) in enumerate(zip(axes_flat, sample_indices, titles)):
         gt = gt_flat[idx]
         pred = pred_flat[idx]
         mse = float(np.mean((pred - gt) ** 2))
-        ax.plot(WL_151, gt, lw=1.8, label="gt")
-        ax.plot(WL_151, pred, lw=1.3, ls="--", label="pred")
+        color = colors[i % len(colors)]
+        ax.plot(WL_151, gt, lw=1.8, color=color, label="真实光谱")
+        ax.plot(WL_151, pred, lw=1.3, color=color, ls="--", label="重建光谱")
         ax.set_title(f"{title}, MSE={mse:.2e}", fontsize=10)
-        ax.set_xlabel("Wavelength (nm)")
-        ax.set_ylabel("Intensity")
+        ax.set_xlabel("波长 λ (nm)")
+        ax.set_ylabel("强度")
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8)
 
@@ -279,7 +367,65 @@ def plot_selected_spectra(gt_flat, pred_flat, image_shape, plot_pixels, out_path
     for ax in axes_flat[n:]:
         ax.axis("off")
 
-    fig.suptitle("Selected pixel spectra", fontsize=14)
+    fig.suptitle("选中像素的真实光谱与重建光谱对比：P编号对应RGB标点图", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def plot_rgb_and_selected_spectra(cube_151, gt_flat, pred_flat, image_shape, plot_pixels, out_path: Path) -> None:
+    """左侧画 RGB 标点图，右侧画这些点的光谱恢复结果，方便一张图放进 PPT。"""
+
+    if image_shape is None:
+        return
+
+    rgb = cube_to_rgb_preview(cube_151)
+    sample_indices, labels, coords = selected_pixel_info(image_shape, plot_pixels, gt_flat.shape[0])
+    colors = plt.cm.tab10(np.linspace(0, 1, max(10, len(labels))))
+
+    n = len(sample_indices)
+    n_cols = 3 if n > 4 else max(1, n)
+    n_rows = int(np.ceil(n / n_cols))
+    fig = plt.figure(figsize=(4.3 * (n_cols + 1), 3.0 * n_rows))
+    gs = fig.add_gridspec(n_rows, n_cols + 1, width_ratios=[1.25] + [1.0] * n_cols)
+
+    ax_rgb = fig.add_subplot(gs[:, 0])
+    ax_rgb.imshow(rgb)
+    ax_rgb.set_title("RGB预览与取谱位置\nR/G/B=650/550/450 nm", fontsize=11)
+    ax_rgb.axis("off")
+
+    for i, (label, (yy, xx)) in enumerate(zip(labels, coords)):
+        color = colors[i % len(colors)]
+        ax_rgb.scatter(xx, yy, s=120, marker="o", facecolors="none", edgecolors="white", linewidths=3.0)
+        ax_rgb.scatter(xx, yy, s=80, marker="o", facecolors="none", edgecolors=color, linewidths=2.0)
+        ax_rgb.text(
+            xx + 8,
+            yy - 8,
+            label,
+            color="white",
+            fontsize=10,
+            weight="bold",
+            bbox=dict(facecolor="black", edgecolor=color, alpha=0.65, pad=2.0),
+        )
+
+    axes = [fig.add_subplot(gs[i // n_cols, i % n_cols + 1]) for i in range(n_rows * n_cols)]
+    for i, (ax, idx, label, (yy, xx)) in enumerate(zip(axes, sample_indices, labels, coords)):
+        color = colors[i % len(colors)]
+        gt = gt_flat[idx]
+        pred = pred_flat[idx]
+        mse = float(np.mean((pred - gt) ** 2))
+        ax.plot(WL_151, gt, lw=1.8, color=color, label="真实")
+        ax.plot(WL_151, pred, lw=1.3, color=color, ls="--", label="重建")
+        ax.set_title(f"{label} (y={yy}, x={xx})\nMSE={mse:.2e}", fontsize=9)
+        ax.set_xlabel("λ/nm", fontsize=8)
+        ax.set_ylabel("强度", fontsize=8)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7)
+
+    for ax in axes[n:]:
+        ax.axis("off")
+
+    fig.suptitle("外部CAVE场景光谱恢复：左侧标出取谱位置，右侧显示对应真实/重建光谱", fontsize=14)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
@@ -364,9 +510,13 @@ def main() -> None:
     # 有图像宽高时，额外存成 cube 并画误差图/测量图
     if image_shape is not None:
         h, w = image_shape
+        cube_151 = spectra_flat.reshape(h, w, 151).astype(np.float32)
         np.save(output_dir / "input_cube_151.npy", spectra_flat.reshape(h, w, 151).astype(np.float32))
         np.save(output_dir / "reconstructed_cube_151.npy", pred_flat.reshape(h, w, 151).astype(np.float32))
         np.save(output_dir / "measurement_channels_image.npy", meas_flat.reshape(h, w, meas_flat.shape[1]).astype(np.float32))
+        plot_rgb_selected_points(cube_151, image_shape, settings["plot_pixels"], output_dir / "rgb_selected_points.png")
+        plot_rgb_and_selected_spectra(cube_151, spectra_flat, pred_flat, image_shape, settings["plot_pixels"],
+                                      output_dir / "selected_pixel_spectra_with_rgb.png")
         plot_error_map(spectra_flat, pred_flat, image_shape, output_dir / "reconstruction_error_map.png")
         plot_measurement_preview(meas_flat, image_shape, output_dir / "measurement_channels_preview.png")
 
@@ -381,6 +531,8 @@ def main() -> None:
     print("  重点看:")
     print(f"    {output_dir / 'selected_pixel_spectra.png'}")
     if image_shape is not None:
+        print(f"    {output_dir / 'rgb_selected_points.png'}")
+        print(f"    {output_dir / 'selected_pixel_spectra_with_rgb.png'}")
         print(f"    {output_dir / 'reconstruction_error_map.png'}")
         print(f"    {output_dir / 'measurement_channels_preview.png'}")
 
